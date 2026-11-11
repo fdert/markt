@@ -12,7 +12,7 @@ RUN apk add --no-cache openssl tzdata
 ENV TZ=Asia/Riyadh NODE_ENV=production
 WORKDIR /app
 COPY package*.json ./
-RUN npm ci && npm cache clean --force
+RUN npm ci --include=dev && npm cache clean --force
 COPY --from=build /app/dist ./dist
 COPY drizzle ./drizzle
 COPY drizzle.config.ts tsconfig.json ./
