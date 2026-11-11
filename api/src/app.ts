@@ -1,0 +1,52 @@
+import express from 'express';
+import cors from 'cors';
+import helmet from 'helmet';
+import compression from 'compression';
+import morgan from 'morgan';
+import { config } from './config.js';
+import { errorHandler } from './lib/http.js';
+import { authenticate } from './middleware/auth.js';
+import authRoutes from './routes/auth.js';
+import userRoutes from './routes/users.js';
+import branchRoutes from './routes/branches.js';
+import catalogRoutes from './routes/catalog.js';
+import inventoryRoutes from './routes/inventory.js';
+import customerRoutes from './routes/customers.js';
+import posRoutes from './routes/pos.js';
+import invoiceRoutes from './routes/invoices.js';
+import purchaseRoutes from './routes/purchases.js';
+import accountingRoutes from './routes/accounting.js';
+import reportRoutes from './routes/reports.js';
+import marketingRoutes from './routes/marketing.js';
+import rentalRoutes from './routes/rentals.js';
+import settingsRoutes from './routes/settings.js';
+
+export function createApp() {
+  const app = express();
+  app.set('trust proxy', 1);
+  app.use(helmet({ contentSecurityPolicy: false }));
+  app.use(cors({ origin: config.corsOrigin === '*' ? true : config.corsOrigin.split(',') }));
+  app.use(compression());
+  app.use(express.json({ limit: '15mb' }));
+  if (process.env.NODE_ENV !== 'test') app.use(morgan('tiny'));
+
+  app.get('/api/health', (_req, res) => res.json({ ok: true, time: new Date().toISOString() }));
+  app.use('/api/auth', authRoutes);
+  app.use('/api', authenticate);
+  app.use('/api/users', userRoutes);
+  app.use('/api/branches', branchRoutes);
+  app.use('/api', catalogRoutes);
+  app.use('/api/inventory', inventoryRoutes);
+  app.use('/api', customerRoutes);
+  app.use('/api/pos', posRoutes);
+  app.use('/api/invoices', invoiceRoutes);
+  app.use('/api', purchaseRoutes);
+  app.use('/api/accounting', accountingRoutes);
+  app.use('/api/reports', reportRoutes);
+  app.use('/api/marketing', marketingRoutes);
+  app.use('/api/rentals', rentalRoutes);
+  app.use('/api', settingsRoutes);
+  app.use('/api', (_req, res) => res.status(404).json({ message: 'المسار غير موجود.' }));
+  app.use(errorHandler);
+  return app;
+}

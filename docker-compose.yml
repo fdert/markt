@@ -1,0 +1,29 @@
+# تشغيل نظام رصيد كاملاً: قاعدة البيانات + الخادم + الواجهة
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: raseed
+      POSTGRES_USER: raseed
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD مطلوب}
+      TZ: Asia/Riyadh
+    volumes: [dbdata:/var/lib/postgresql/data]
+    healthcheck: { test: ["CMD-SHELL", "pg_isready -U raseed"], interval: 10s, retries: 5 }
+  api:
+    build: ./api
+    restart: unless-stopped
+    depends_on: { db: { condition: service_healthy } }
+    environment:
+      DATABASE_URL: postgresql://raseed:${DB_PASSWORD}@db:5432/raseed
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET مطلوب}
+      JWT_EXPIRES: ${JWT_EXPIRES:-12h}
+      CORS_ORIGIN: ${APP_URL:-*}
+      PORT: 4000
+  web:
+    build: ./web
+    restart: unless-stopped
+    depends_on: [api]
+    ports: ["${WEB_PORT:-8080}:80"]
+volumes:
+  dbdata:
