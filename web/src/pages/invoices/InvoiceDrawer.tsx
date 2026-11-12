@@ -7,6 +7,7 @@ import { useAuth } from '../../lib/auth';
 import { money, qty, dateTime, INVOICE_STATUS, ZATCA_STATUS, PAYMENT_LABELS, CHANNEL_LABELS } from '../../lib/format';
 import { Badge, Button, Drawer, Modal, NumberInput, Select, Spinner, Segmented, Input, useToast } from '../../components/ui';
 import { usePrinter } from '../../features/print/usePrinter';
+import { deviceStore } from '../../features/print/escpos';
 import { docTitle, type PrintableInvoice } from '../../features/print/receipt';
 
 type Detail = Omit<PrintableInvoice, 'items'> & {
@@ -86,7 +87,7 @@ export function InvoiceDrawer({ id, onClose, onOpen }: { id: number | null; onCl
           )}
         </div>
       )}
-      {inv && <ReturnModal open={modal === 'return'} inv={inv} onClose={() => setModal(null)} onDone={(cn) => { setModal(null); refresh(); toast.success('تم إصدار إشعار الدائن.'); printer.print(cn as never).catch(() => undefined); }} />}
+      {inv && <ReturnModal open={modal === 'return'} inv={inv} onClose={() => setModal(null)} onDone={(cn) => { setModal(null); refresh(); toast.success('تم إصدار إشعار الدائن.'); if (deviceStore.get().autoPrintOnReturn) printer.print(cn as never).catch(() => undefined); }} />}
       {inv && <CollectModal open={modal === 'collect'} inv={inv} onClose={() => setModal(null)} onDone={() => { setModal(null); refresh(); toast.success('تم التحصيل.'); }} />}
       {inv && <PrintModal open={modal === 'print'} inv={inv} onClose={() => setModal(null)} />}
     </Drawer>
@@ -123,7 +124,7 @@ function ReturnModal({ open, inv, onClose, onDone }: { open: boolean; inv: Detai
       </table>
       <div className="grid sm:grid-cols-2 gap-3">
         <Select label="طريقة الاسترداد" value={method} onChange={(e) => setMethod(e.target.value)}>
-          <option value="CASH">نقدي</option><option value="CARD">شبكة</option><option value="BANK_TRANSFER">تحويل بنكي</option>{inv.customer && <option value="CREDIT">خصم من مستحقات العميل</option>}
+          <option value="CASH">نقدي</option><option value="CARD">شبكة</option><option value="BANK_TRANSFER">تحويل بنكي</option>{inv.customer && <option value="CREDIT">خصم من مستحقات العميل</option>}{inv.customer && <option value="WALLET">إلى محفظة العميل</option>}
         </Select>
         <Input label="سبب الإرجاع" value={reason} onChange={(e) => setReason(e.target.value)} placeholder="مثال: منتج تالف" />
       </div>

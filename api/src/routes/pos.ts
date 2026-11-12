@@ -21,10 +21,10 @@ r.use(can('pos.use', 'invoices.view'));
 r.get('/products', ah(async (req, res) => {
   const q = req.query as Record<string, string>;
   const branchId = Number(q.branchId);
-  const cond = and(eq(P.active, true), eq(P.posEnabled, true), q.categoryId ? eq(P.categoryId, Number(q.categoryId)) : undefined,
+  const cond = and(eq(P.active, true), eq(P.posEnabled, true), q.categoryId ? eq(P.categoryId, Number(q.categoryId)) : undefined, q.favorites ? eq(P.isFavorite, true) : undefined,
     q.search ? or(ilike(P.name, `%${q.search}%`), ilike(P.nameEn, `%${q.search}%`), eq(P.barcode, q.search), eq(P.sku, q.search)) : undefined);
   const rows = await db.select({
-    id: P.id, name: P.name, price: P.price, image: P.image, barcode: P.barcode, isWeighted: P.isWeighted, pricePerWeight: P.pricePerWeight,
+    id: P.id, name: P.name, price: P.price, image: P.image, isFavorite: P.isFavorite, barcode: P.barcode, isWeighted: P.isWeighted, pricePerWeight: P.pricePerWeight,
     unlimited: P.unlimited, type: P.type, isComposite: P.isComposite, categoryId: P.categoryId, expiryDate: P.expiryDate, unitName: P.unitName,
     stock: sql<number>`coalesce((select qty from stocks s where s.product_id = ${qcol(P.id)} and s.branch_id = ${branchId}), 0)::float`,
     unitsCount: sql<number>`(select count(*)::int from product_units u where u.product_id = ${qcol(P.id)} and u.active)`,
@@ -143,15 +143,20 @@ r.post('/shift/:id/reopen', can('shifts.manage'), ah(async (req, res) => {
 
 // ===== الفواتير المعلّقة =====
 r.get('/held', ah(async (req, res) => {
-  res.json(await db.select().from(schema.heldCarts).where(and(eq(schema.heldCarts.userId, req.user!.id), req.query.branchId ? eq(schema.heldCarts.branchId, Number(req.query.branchId)) : undefined)).orderBy(desc(schema.heldCarts.id)));
+  // سلال الطاولات مشتركة بين الكاشيرية، وبقية المعلّقة خاصة بصاحبها
+  res.json(await db.select().from(schema.heldCarts).where(and(sql`(${schema.heldCarts.userId} = ${req.user!.id} or ${schema.heldCarts.tableId} is not null)`, req.query.branchId ? eq(schema.heldCarts.branchId, Number(req.query.branchId)) : undefined)).orderBy(desc(schema.heldCarts.id)));
 }));
 r.post('/held', ah(async (req, res) => {
-  const b = z.object({ branchId: z.number(), label: z.string().nullish(), data: z.any() }).parse(req.body) as { branchId: number; label?: string | null; data: unknown };
-  const [row] = await db.insert(schema.heldCarts).values({ ...b, userId: req.user!.id }).returning();
+  const b = z.object({ branchId: z.number(), label: z.string().nullish(), tableId: z.number().nullish(), orderType: z.string().nullish(), orderNo: z.number().nullish(), data: z.any() }).parse(req.body) as { branchId: number; label?: string | null; tableId?: number | null; orderType?: string | null; orderNo?: number | null; data: unknown };
+  if (b.tableId) {
+    const [busy] = await db.select({ id: schema.heldCarts.id }).from(schema.heldCarts).where(eq(schema.heldCarts.tableId, b.tableId));
+    if (busy) await db.delete(schema.heldCarts).where(eq(schema.heldCarts.id, busy.id)); // استبدال سلة الطاولة نفسها
+  }
+  const [row] = await db.insert(schema.heldCarts).values({ ...b, tableId: b.tableId ?? null, orderType: b.orderType ?? null, orderNo: b.orderNo ?? null, userId: req.user!.id }).returning();
   res.status(201).json(row);
 }));
 r.delete('/held/:id', ah(async (req, res) => {
-  await db.delete(schema.heldCarts).where(and(eq(schema.heldCarts.id, Number(req.params.id)), eq(schema.heldCarts.userId, req.user!.id)));
+  await db.delete(schema.heldCarts).where(and(eq(schema.heldCarts.id, Number(req.params.id)), sql`(${schema.heldCarts.userId} = ${req.user!.id} or ${schema.heldCarts.tableId} is not null)`));
   res.json({ message: 'تم الحذف.' });
 }));
 

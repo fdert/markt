@@ -2,17 +2,23 @@
 import { useEffect, useState, type ReactNode } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Store, Receipt, Percent, Building2, Users, Coins, Upload, Printer, ShoppingCart, ArrowRight, Plus, Pencil, Link2, ShieldCheck, Pause, Play, Unplug, Download } from 'lucide-react';
+import { Store, Receipt, Percent, Building2, Users, Coins, Upload, Printer, ShoppingCart, UtensilsCrossed, CreditCard, Tags, QrCode, Keyboard, ArrowRight, Plus, Pencil, Link2, ShieldCheck, Pause, Play, Unplug, Download } from 'lucide-react';
 import { api, download } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { money } from '../../lib/format';
 import { Badge, Button, Card, Checkbox, Empty, Input, Modal, NumberInput, PageHeader, Segmented, Select, Spinner, Textarea, Toggle, useToast } from '../../components/ui';
 import { PrinterSettingsModal, useSettings, type AllSettings } from '../../features/print/usePrinter';
 import { receiptHtml, a4Html, type InvoiceSettings, type PrintableInvoice } from '../../features/print/receipt';
+import { RestaurantSettings, PaymentMethodsSettings, PriceListsSettings, MenuSettings, ShortcutsSettings } from './ExtraSettings';
 
 const SECTIONS = [
   { key: 'basic', icon: <Store />, title: 'الإعدادات الأساسية', desc: 'الاسم، الوصف، الشعار، التواصل' },
   { key: 'options', icon: <ShoppingCart />, title: 'خيارات نقطة البيع', desc: 'الخصم، الصلاحية، المخزون، الميزان، الولاء' },
+  { key: 'restaurant', icon: <UtensilsCrossed />, title: 'المطاعم والطلبات', desc: 'أنواع الطلب، الطاولات، شاشة المطبخ وطابعاتها' },
+  { key: 'payments', icon: <CreditCard />, title: 'طرق الدفع', desc: 'الشبكة، تطبيقات التوصيل، تابي وتمارا، المحفظة' },
+  { key: 'pricelists', icon: <Tags />, title: 'مجموعات الأسعار', desc: 'الجملة، الموظفين، كبار العملاء' },
+  { key: 'menu', icon: <QrCode />, title: 'المنيو الذكي', desc: 'منيو عام برمز QR للطاولات' },
+  { key: 'shortcuts', icon: <Keyboard />, title: 'اختصارات لوحة المفاتيح', desc: 'تخصيص أزرار الكاشير لهذا الجهاز' },
   { key: 'billing', icon: <Receipt />, title: 'الفواتير', desc: 'قوالب الفواتير وبيانات الطباعة' },
   { key: 'tax', icon: <Percent />, title: 'ضريبة القيمة المضافة', desc: 'الضريبة والفوترة الإلكترونية (زاتكا)' },
   { key: 'printer', icon: <Printer />, title: 'الطابعة', desc: 'الطابعة الحرارية، قص الورق، درج النقود' },
@@ -25,7 +31,7 @@ const SECTIONS = [
 export default function SettingsRouter() {
   const { section } = useParams();
   if (!section) return <SettingsHub />;
-  const map: Record<string, ReactNode> = { basic: <BasicSettings />, options: <PosOptions />, billing: <BillingSettings />, tax: <TaxSettings />, printer: <PrinterPage />, branches: <BranchesPage />, employees: <EmployeesPage />, currency: <CurrencySettings />, import: <ImportPage /> };
+  const map: Record<string, ReactNode> = { restaurant: <RestaurantSettings />, payments: <PaymentMethodsSettings />, pricelists: <PriceListsSettings />, menu: <MenuSettings />, shortcuts: <ShortcutsSettings />, basic: <BasicSettings />, options: <PosOptions />, billing: <BillingSettings />, tax: <TaxSettings />, printer: <PrinterPage />, branches: <BranchesPage />, employees: <EmployeesPage />, currency: <CurrencySettings />, import: <ImportPage /> };
   const s = SECTIONS.find((x) => x.key === section);
   return (
     <>
@@ -88,6 +94,7 @@ function BasicSettings() {
 }
 
 type PosOpts = { requireCustomer: boolean; allowManualDiscount: boolean; maxDiscountPercent: number; allowCoupons: boolean; allowExpiredSale: boolean; expiryWarningDays: number; defaultLowStock: number; allowNegativeStock: boolean;
+  rounding: { enabled: boolean; step: number; mode: 'NEAREST' | 'UP' | 'DOWN' }; allowFractionalQty: boolean; showOrderNumber: boolean; multiPayment: boolean; customerWallet: boolean;
   weightBarcode: { enabled: boolean; prefixes: string[]; itemCodeLength: number; valueLength: number; valueType: 'WEIGHT' | 'PRICE'; divisor: number }; loyalty: { enabled: boolean; pointsPerRiyal: number; riyalPerPoint: number; minRedeem: number } };
 function PosOptions() {
   const { data } = useSettings(); const save = useSave('pos');
@@ -101,6 +108,17 @@ function PosOptions() {
         <Toggle checked={v.allowManualDiscount} onChange={(x) => set('allowManualDiscount', x)} label="السماح بالخصم اليدوي" hint="يستطيع الكاشير إضافة خصم يدوي بمبلغ أو نسبة." />
         <div className="max-w-xs my-2"><NumberInput label="الحد الأقصى للخصم اليدوي" suffix="%" value={v.maxDiscountPercent} onChange={(x) => set('maxDiscountPercent', x ?? 0)} hint="أعلى نسبة يستطيع أي مستخدم خصمها، بما فيه المالك. الخصم بالمبلغ يخضع للحد نفسه." /></div>
         <Toggle checked={v.allowCoupons} onChange={(x) => set('allowCoupons', x)} label="السماح بالكوبونات في نقطة البيع" />
+        <Toggle checked={v.multiPayment} onChange={(x) => set('multiPayment', x)} label="تفعيل الدفع المتعدد" hint="دفع الفاتورة الواحدة بأكثر من طريقة (نقدي + شبكة…)." />
+        <Toggle checked={v.allowFractionalQty} onChange={(x) => set('allowFractionalQty', x)} label="تفعيل الكسور في كمية المنتج" hint="المنتجات الموزونة تقبل الكسور دائماً." />
+        <Toggle checked={v.showOrderNumber} onChange={(x) => set('showOrderNumber', x)} label="رقم الطلب اليومي" hint="رقم يبدأ من 1 كل يوم، يُطبع كبيراً على الإيصال وتذكرة المطبخ." />
+        <Toggle checked={v.customerWallet} onChange={(x) => set('customerWallet', x)} label="الدفع عبر محفظة العميل" hint="رصيد مسبق الدفع يُشحن من صفحة العميل." />
+      </Card>
+      <Card title="تقريب الفاتورة">
+        <Toggle checked={v.rounding.enabled} onChange={(x) => set('rounding', { ...v.rounding, enabled: x })} label="تقريب إجمالي الفاتورة" hint="يُوزَّع فرق التقريب على البنود فتبقى ضريبة القيمة المضافة صحيحة في الفاتورة الإلكترونية." />
+        {v.rounding.enabled && <div className="grid sm:grid-cols-2 gap-3 mt-2">
+          <Select label="التقريب لأقرب" value={String(v.rounding.step)} onChange={(e) => set('rounding', { ...v.rounding, step: Number(e.target.value) })}><option value="0.05">5 هللات</option><option value="0.1">10 هللات</option><option value="0.25">ربع ريال</option><option value="0.5">نصف ريال</option><option value="1">ريال</option></Select>
+          <Select label="الاتجاه" value={v.rounding.mode} onChange={(e) => set('rounding', { ...v.rounding, mode: e.target.value as 'UP' })}><option value="NEAREST">الأقرب</option><option value="UP">للأعلى</option><option value="DOWN">للأسفل</option></Select>
+        </div>}
       </Card>
       <Card title="صلاحية المنتجات">
         <Toggle checked={v.allowExpiredSale} onChange={(x) => set('allowExpiredSale', x)} label="السماح ببيع منتج منتهي الصلاحية" hint="معطّل = منع البيع نهائياً (الافتراضي والأأمن)." />
@@ -139,6 +157,7 @@ const INV_GROUPS: Array<[string, Array<[keyof InvoiceSettings, string]>]> = [
   ['الفرع', [['showBranch', 'الفرع'], ['showBranchAddress', 'عنوان الفرع'], ['showBranchPhone', 'هاتف الفرع']]],
   ['بنود المنتجات', [['showLineNumbers', 'ترقيم البنود'], ['showSku', 'رقم الصنف'], ['showUnit', 'نوع الوحدة'], ['showBarcode', 'الباركود']]],
   ['الأسعار والضريبة', [['showItemDiscount', 'خصم البند'], ['showSubtotal', 'الإجمالي قبل الضريبة'], ['showTaxRate', 'نسبة الضريبة'], ['showTaxAmount', 'مبلغ الضريبة']]],
+  ['الطلب والإيصال', [['showOrderNumber', 'رقم الطلب'], ['showOrderType', 'نوع الطلب والطاولة'], ['printItemCount', 'عدد وكمية المنتجات'], ['printBranchAsTitle', 'اسم الفرع كعنوان للفاتورة']]],
   ['إضافات', [['showNotes', 'إظهار الملاحظات'], ['showFooter', 'إظهار التذييل'], ['showSignature', 'التوقيع'], ['showStamp', 'الختم']]],
 ];
 function BillingSettings() {

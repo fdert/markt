@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { useQuery } from '@tanstack/react-query';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { api, ApiError } from '../../lib/api';
 import { Button, Input, Select, Toggle, useToast } from '../../components/ui';
@@ -6,7 +7,7 @@ import type { Customer } from '../../features/pos/types';
 
 export interface CustomerFull extends Customer {
   email?: string | null; type?: string; gender?: string | null; active?: boolean; crNumber?: string | null; country?: string | null; city?: string | null; district?: string | null;
-  street?: string | null; buildingNo?: string | null; additionalNo?: string | null; postalCode?: string | null; shortAddress?: string | null; notes?: string | null;
+  street?: string | null; buildingNo?: string | null; additionalNo?: string | null; postalCode?: string | null; shortAddress?: string | null; notes?: string | null; priceListId?: number | null;
 }
 
 /** نموذج العميل: البيانات الأساسية والضريبية والعنوان الوطني */
@@ -21,6 +22,7 @@ export function CustomerForm({ initial, onSaved, onCancel }: { initial?: Partial
     onError: (e) => { if (e instanceof ApiError && e.errors) setErrors(Object.fromEntries(e.errors.map((x) => [x.path, x.message]))); toast.error(e); },
   });
   const isOrg = v.type !== 'INDIVIDUAL';
+  const { data: lists } = useQuery({ queryKey: ['price-lists'], queryFn: () => api<Array<{ id: number; name: string; active: boolean }>>('/price-lists') });
   return (
     <form className="space-y-5" onSubmit={(e) => { e.preventDefault(); setErrors({}); save.mutate(); }}>
       <fieldset className="space-y-3">
@@ -32,6 +34,7 @@ export function CustomerForm({ initial, onSaved, onCancel }: { initial?: Partial
           <Select label="النوع" value={v.type} onChange={set('type')}><option value="INDIVIDUAL">فرد</option><option value="COMPANY">شركة</option><option value="GOVERNMENT">حكومي</option><option value="NGO">جمعية</option></Select>
           {!isOrg && <Select label="الجنس" value={v.gender ?? ''} onChange={set('gender')}><option value="">—</option><option value="MALE">ذكر</option><option value="FEMALE">أنثى</option></Select>}
         </div>
+        <Select label="مجموعة الأسعار" value={v.priceListId ?? ''} onChange={(e) => setV((s) => ({ ...s, priceListId: e.target.value ? Number(e.target.value) : null }))} hint="تُطبَّق تلقائياً عند اختيار العميل في الكاشير."><option value="">السعر الافتراضي</option>{lists?.filter((l) => l.active).map((l) => <option key={l.id} value={l.id}>{l.name}</option>)}</Select>
         <Toggle checked={v.active ?? true} onChange={(a) => setV((s) => ({ ...s, active: a }))} label="العميل مفعّل" />
       </fieldset>
       <fieldset className="space-y-3">

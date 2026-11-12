@@ -49,7 +49,7 @@ export default function ProductsPage() {
         {sel.length > 0 && (
           <div className="mx-4 mb-3 flex flex-wrap items-center gap-2 rounded-lg bg-brand-50 px-3 py-2 text-sm">
             <span>محدّدة: <b className="num">{sel.length}</b></span>
-            <Button size="sm" variant="secondary" onClick={() => bulk.mutate('activate')}>تفعيل</Button><Button size="sm" variant="secondary" onClick={() => bulk.mutate('hide')}>إخفاء</Button>
+            <Button size="sm" variant="secondary" onClick={() => bulk.mutate('activate')}>تفعيل</Button><Button size="sm" variant="secondary" onClick={() => bulk.mutate('hide')}>إخفاء</Button><Button size="sm" variant="secondary" onClick={() => bulk.mutate('favorite')}>إضافة للمفضلة</Button><Button size="sm" variant="secondary" onClick={() => bulk.mutate('unfavorite')}>إزالة من المفضلة</Button>
             <Button size="sm" variant="ghost" onClick={() => setSel([])}>إلغاء التحديد</Button>
           </div>
         )}

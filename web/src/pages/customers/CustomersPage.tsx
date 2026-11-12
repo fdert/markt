@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Plus, Pencil, Trash2 } from 'lucide-react';
+import { Plus, Pencil, Trash2, Wallet } from 'lucide-react';
+import { WalletModal } from './WalletModal';
 import { api } from '../../lib/api';
 import { money, date, INVOICE_STATUS } from '../../lib/format';
 import { Badge, Button, Card, Confirm, Drawer, Empty, Modal, PageHeader, Pager, SearchInput, Select, Spinner, Stat, Tabs, useDebounced, useToast } from '../../components/ui';
@@ -15,11 +16,11 @@ export default function CustomersPage() {
   const qc = useQueryClient(); const toast = useToast(); const [params, setParams] = useSearchParams();
   const [filter, setFilter] = useState(''); const [type, setType] = useState(''); const [sort, setSort] = useState('');
   const [search, setSearch] = useState(''); const ds = useDebounced(search); const [page, setPage] = useState(1);
-  const [form, setForm] = useState<Partial<CustomerFull> | null>(null); const [view, setView] = useState<number | null>(null); const [inv, setInv] = useState<number | null>(null); const [del, setDel] = useState<number | null>(null);
+  const [form, setForm] = useState<Partial<CustomerFull> | null>(null); const [view, setView] = useState<number | null>(null); const [inv, setInv] = useState<number | null>(null); const [del, setDel] = useState<number | null>(null); const [wallet, setWallet] = useState<{ id: number; name: string } | null>(null);
   useEffect(() => { if (params.get('new')) { setForm({}); setParams({}); } }, [params, setParams]);
   const query = { filter, type, sort, search: ds, page, limit: 25 };
   const { data, isLoading } = useQuery({ queryKey: ['customers', query], queryFn: () => api<{ rows: Row[]; total: number; stats: { total: number; newThisMonth: number; withDue: number; totalDue: number } }>('/customers', { query }) });
-  const { data: c } = useQuery({ queryKey: ['customer', view], queryFn: () => api<CustomerFull & { due: number; invoicesCount: number; lastPurchase: string | null; createdAt: string; loyaltyPoints: number; totals: { total: number; paid: number }; invoices: Array<{ id: number; number: string; total: number; due: number; status: string; type: string; createdAt: string }> }>(`/customers/${view}`), enabled: !!view });
+  const { data: c } = useQuery({ queryKey: ['customer', view], queryFn: () => api<CustomerFull & { due: number; invoicesCount: number; lastPurchase: string | null; createdAt: string; loyaltyPoints: number; walletBalance: number; totals: { total: number; paid: number }; invoices: Array<{ id: number; number: string; total: number; due: number; status: string; type: string; createdAt: string }> }>(`/customers/${view}`), enabled: !!view });
   const remove = useMutation({ mutationFn: () => api(`/customers/${del}`, { method: 'DELETE' }), onSuccess: () => { qc.invalidateQueries({ queryKey: ['customers'] }); setDel(null); setView(null); toast.success('تم الحذف.'); }, onError: toast.error });
   return (
     <>
@@ -47,9 +48,9 @@ export default function CustomersPage() {
         {form && <CustomerForm initial={form} onSaved={() => { setForm(null); qc.invalidateQueries({ queryKey: ['customer'] }); }} onCancel={() => setForm(null)} />}
       </Modal>
       <Drawer open={!!view} onClose={() => setView(null)} title={c?.name ?? 'تفاصيل العميل'}
-        footer={c && <><Button variant="secondary" onClick={() => setForm(c)}><Pencil className="size-4" />تعديل</Button>{!c.invoicesCount && <Button variant="ghost" onClick={() => setDel(c.id)}><Trash2 className="size-4" />حذف</Button>}</>}>
+        footer={c && <><Button onClick={() => setWallet({ id: c.id, name: c.name })}><Wallet className="size-4" />المحفظة</Button><Button variant="secondary" onClick={() => setForm(c)}><Pencil className="size-4" />تعديل</Button>{!c.invoicesCount && <Button variant="ghost" onClick={() => setDel(c.id)}><Trash2 className="size-4" />حذف</Button>}</>}>
         {!c ? <Spinner /> : <div className="space-y-5">
-          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3"><Stat label="إجمالي الفواتير" value={money(c.totals.total)} /><Stat label="المحصّل" value={money(c.totals.paid)} /><Stat label="المستحق" value={money(c.due)} /><Stat label="نقاط الولاء" value={money(c.loyaltyPoints, 0)} /></div>
+          <div className="grid grid-cols-2 sm:grid-cols-5 gap-3"><Stat label="إجمالي الفواتير" value={money(c.totals.total)} /><Stat label="المحصّل" value={money(c.totals.paid)} /><Stat label="المستحق" value={money(c.due)} /><Stat label="رصيد المحفظة" value={money(c.walletBalance)} /><Stat label="نقاط الولاء" value={money(c.loyaltyPoints, 0)} /></div>
           <dl className="grid grid-cols-2 gap-3 text-[14px]">
             {[['الجوال', c.phone], ['البريد', c.email], ['الرقم الضريبي', c.vatNumber], ['السجل التجاري', c.crNumber], ['العنوان', [c.buildingNo, c.street, c.district, c.city, c.postalCode].filter(Boolean).join('، ')], ['تاريخ الإنشاء', date(c.createdAt)]].map(([k, v]) => <div key={k}><dt className="text-ink-500">{k}</dt><dd>{v || '—'}</dd></div>)}
           </dl>
@@ -59,6 +60,7 @@ export default function CustomersPage() {
           </section>
         </div>}
       </Drawer>
+      <WalletModal customer={wallet} onClose={() => setWallet(null)} />
       <InvoiceDrawer id={inv} onClose={() => setInv(null)} onOpen={setInv} />
       <Confirm open={!!del} onClose={() => setDel(null)} onConfirm={() => remove.mutate()} loading={remove.isPending} danger title="حذف العميل" message="هل تريد حذف هذا العميل؟ لا يمكن التراجع عن الحذف." confirmText="حذف" />
     </>

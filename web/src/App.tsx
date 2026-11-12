@@ -28,6 +28,13 @@ const Acc = {
 };
 const Coupons = lazy(() => import('./pages/MarketingPages').then((m) => ({ default: m.CouponsPage })));
 const Offers = lazy(() => import('./pages/MarketingPages').then((m) => ({ default: m.OffersPage })));
+const KitchenPage = lazy(() => import('./pages/standalone/KitchenPage'));
+const CustomerDisplayPage = lazy(() => import('./pages/standalone/CustomerDisplayPage'));
+const PublicMenuPage = lazy(() => import('./pages/standalone/PublicMenuPage'));
+const QrReaderPage = lazy(() => import('./pages/QrReaderPage'));
+const StocktakesPage = lazy(() => import('./pages/inventory/StocktakesPage'));
+const DamagedPage = lazy(() => import('./pages/inventory/DamagedPage'));
+const DailyReportPage = lazy(() => import('./pages/DailyReportPage'));
 const Activity = lazy(() => import('./pages/MiscPages').then((m) => ({ default: m.ActivityPage })));
 const Profile = lazy(() => import('./pages/MiscPages').then((m) => ({ default: m.ProfilePage })));
 
@@ -53,6 +60,9 @@ export default function App() {
         <Routes>
           <Route path="/login" element={<Login />} />
           <Route path="/pos" element={P(['pos.use'], <PosPage />)} />
+          <Route path="/kitchen" element={<Guard><KitchenPage /></Guard>} />
+          <Route path="/customer-display" element={<CustomerDisplayPage />} />
+          <Route path="/menu" element={<PublicMenuPage />} />
           <Route element={<Guard><Layout /></Guard>}>
             <Route index element={<Home />} />
             <Route path="invoices" element={P(['invoices.view', 'pos.use'], <InvoicesPage />)} />
@@ -65,6 +75,10 @@ export default function App() {
             <Route path="purchases" element={P(['purchases.manage'], <PurchasesPage />)} />
             <Route path="expenses" element={P(['expenses.manage'], <ExpensesPage />)} />
             <Route path="reports" element={P(['reports.view'], <ReportsPage />)} />
+            <Route path="reports/daily" element={P(['reports.view', 'shifts.manage', 'pos.use'], <DailyReportPage />)} />
+            <Route path="tools/qr-reader" element={<QrReaderPage />} />
+            <Route path="inventory/stocktakes" element={P(['inventory.adjust', 'products.view'], <StocktakesPage />)} />
+            <Route path="inventory/damaged" element={P(['inventory.adjust', 'products.view'], <DamagedPage />)} />
             <Route path="rentals" element={P(['rentals.manage'], <RentalsPage />)} />
             <Route path="accounting" element={P(['accounting.view'], <Acc.Overview />)} />
             <Route path="accounting/accounts" element={P(['accounting.view'], <Acc.Accounts />)} />

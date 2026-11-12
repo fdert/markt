@@ -8,12 +8,14 @@ export interface InvoiceSettings {
   showCustomerAddress: boolean; showLineNumbers: boolean; showSku: boolean; showUnit: boolean; showItemDiscount: boolean; showSubtotal: boolean;
   showTaxRate: boolean; showTaxAmount: boolean; showBarcode: boolean; showNotes: boolean; showFooter: boolean; showSignature: boolean; showStamp: boolean;
   notesText: string; footerText: string; signature: string; stamp: string;
+  printItemCount?: boolean; printBranchAsTitle?: boolean; showOrderNumber?: boolean; showOrderType?: boolean;
 }
 export interface StoreInfo { name: string; nameEn?: string; logo?: string; crNumber?: string; phone?: string; vatNumber?: string; city?: string; street?: string; district?: string }
 
 export interface PrintableInvoice {
   id: number; number: string; kind: string; type: string; status: string; createdAt: string; subtotal: number; discount: number; taxTotal: number; total: number;
   paid: number; due: number; notes?: string | null; qrCode?: string | null; returnReason?: string | null; change?: number; supplyDate?: string | null;
+  orderNo?: number | null; orderType?: string | null; rounding?: number; tableName?: string | null;
   items: Array<{ name: string; barcode?: string | null; qty: number; unitPrice: number; discount: number; taxRate: number; taxAmount: number; netAmount: number; total: number; unitName?: string | null }>;
   payments: Array<{ method: string; amount: number }>;
   customer?: { name: string; phone?: string | null; vatNumber?: string | null; crNumber?: string | null; city?: string | null; district?: string | null; street?: string | null; buildingNo?: string | null; postalCode?: string | null } | null;
@@ -21,6 +23,7 @@ export interface PrintableInvoice {
   user?: { name: string } | null; original?: { number: string } | null;
 }
 
+export const ORDER_TYPE_LABELS: Record<string, string> = { DINE_IN: 'محلي', TAKEAWAY: 'سفري', DELIVERY: 'توصيل' };
 const esc = (s: unknown) => String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]!));
 
 export const docTitle = (inv: PrintableInvoice) =>
@@ -54,14 +57,16 @@ export async function receiptHtml(inv: PrintableInvoice, s: InvoiceSettings, sto
     img.logo { max-width: 60%; max-height: 22mm; display: block; margin: 0 auto 4px; } img.qr { width: ${widthMm === 58 ? 30 : 36}mm; display: block; margin: 6px auto 0; }
   </style></head><body>
     ${s.showLogo && store.logo ? `<img class="logo" src="${store.logo}" alt="">` : ''}
-    ${s.showStoreName ? `<div class="c big">${esc(store.name)}</div>` : ''}
-    ${s.showBranch && inv.branch ? `<div class="c">${esc(inv.branch.name)}</div>` : ''}
+    ${s.showStoreName ? `<div class="c big">${esc(s.printBranchAsTitle && inv.branch ? inv.branch.name : store.name)}</div>` : ''}
+    ${s.showBranch && inv.branch && !s.printBranchAsTitle ? `<div class="c">${esc(inv.branch.name)}</div>` : ''}
     ${s.showBranchAddress && inv.branch?.city ? `<div class="c">${esc([inv.branch.city, inv.branch.district, inv.branch.street].filter(Boolean).join('، '))}</div>` : ''}
     ${s.showBranchPhone && inv.branch?.phone ? `<div class="c">هاتف: <span class="num">${esc(inv.branch.phone)}</span></div>` : ''}
     ${s.showVatNumber && store.vatNumber ? `<div class="c">الرقم الضريبي: <span class="num">${esc(store.vatNumber)}</span></div>` : ''}
     ${s.showCr && (inv.branch?.crNumber || store.crNumber) ? `<div class="c">السجل التجاري: <span class="num">${esc(inv.branch?.crNumber || store.crNumber)}</span></div>` : ''}
     <div class="hr"></div>
     <div class="c b" style="font-size:${fs + 2}px">${docTitle(inv)}</div>
+    ${s.showOrderNumber !== false && inv.orderNo ? `<div class="c" style="font-size:${fs + 14}px;font-weight:800;border:2px solid #000;border-radius:6px;margin:4px 20%">${inv.orderNo}</div>` : ''}
+    ${s.showOrderType !== false && inv.orderType ? `<div class="c b">${ORDER_TYPE_LABELS[inv.orderType] ?? ''}${inv.tableName ? ` — ${esc(inv.tableName)}` : ''}</div>` : ''}
     <div class="row"><span>رقم الفاتورة</span><span class="num b">${esc(inv.number)}</span></div>
     <div class="row"><span>التاريخ</span><span>${dateTime(inv.createdAt)}</span></div>
     ${inv.original ? `<div class="row"><span>الفاتورة الأصلية</span><span class="num">${esc(inv.original.number)}</span></div>` : ''}
@@ -75,9 +80,11 @@ export async function receiptHtml(inv: PrintableInvoice, s: InvoiceSettings, sto
         <tr><td><span class="num">${qty(it.qty)}</span>${s.showUnit && it.unitName ? ` ${esc(it.unitName)}` : ''} × <span class="num">${money((it.total + 0) / it.qty)}</span>${s.showItemDiscount && it.discount > 0 ? ` <small>(خصم ${money(it.discount)})</small>` : ''}</td><td style="text-align:left" class="num">${money(it.total)}</td></tr>`).join('')}
     </tbody></table>
     <div class="hr"></div>
+    ${s.printItemCount !== false ? `<div class="row"><span>عدد الأصناف / القطع</span><span class="num">${inv.items.length} / ${qty(inv.items.reduce((a, it) => a + it.qty, 0))}</span></div>` : ''}
     ${s.showSubtotal ? `<div class="row"><span>الإجمالي قبل الضريبة</span><span class="num">${money(inv.subtotal)}</span></div>` : ''}
     ${inv.discount > 0 ? `<div class="row"><span>الخصم</span><span class="num">${money(inv.discount)}</span></div>` : ''}
     ${s.showTaxAmount ? `<div class="row"><span>ضريبة القيمة المضافة${s.showTaxRate ? ` (${inv.items[0]?.taxRate ?? 15}%)` : ''}</span><span class="num">${money(inv.taxTotal)}</span></div>` : ''}
+    ${inv.rounding ? `<div class="row"><span>تقريب الفاتورة</span><span class="num">${money(inv.rounding)}</span></div>` : ''}
     <div class="row big"><span>الإجمالي</span><span class="num">${money(inv.total)}</span></div>
     ${s.showPaymentMethod ? pays.map((p) => `<div class="row"><span>${PAYMENT_LABELS[p.method] ?? p.method}</span><span class="num">${money(Math.abs(p.amount))}</span></div>`).join('') : ''}
     ${inv.change ? `<div class="row"><span>الباقي للعميل</span><span class="num">${money(inv.change)}</span></div>` : ''}

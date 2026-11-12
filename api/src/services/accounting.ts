@@ -10,6 +10,7 @@ export const DEFAULT_ACCOUNTS: Array<{ code: string; name: string; type: string;
   { code: '1100', name: 'الصندوق (النقدية)', type: 'ASSET', parent: '1000', key: 'CASH' },
   { code: '1110', name: 'البنك والشبكة', type: 'ASSET', parent: '1000', key: 'BANK' },
   { code: '1200', name: 'ذمم العملاء', type: 'ASSET', parent: '1000', key: 'AR' },
+  { code: '1210', name: 'ذمم شركات التوصيل والدفع الآجل', type: 'ASSET', parent: '1000', key: 'APP_RECEIVABLE' },
   { code: '1300', name: 'المخزون', type: 'ASSET', parent: '1000', key: 'INVENTORY' },
   { code: '1400', name: 'ضريبة القيمة المضافة - المدخلات', type: 'ASSET', parent: '1000', key: 'VAT_INPUT' },
   { code: '2000', name: 'الخصوم', type: 'LIABILITY', group: true },
@@ -17,6 +18,7 @@ export const DEFAULT_ACCOUNTS: Array<{ code: string; name: string; type: string;
   { code: '2200', name: 'ضريبة القيمة المضافة - المخرجات', type: 'LIABILITY', parent: '2000', key: 'VAT_OUTPUT' },
   { code: '2300', name: 'تأمينات العملاء', type: 'LIABILITY', parent: '2000', key: 'DEPOSITS' },
   { code: '2400', name: 'نقاط الولاء المستحقة', type: 'LIABILITY', parent: '2000', key: 'LOYALTY' },
+  { code: '2500', name: 'أرصدة محافظ العملاء', type: 'LIABILITY', parent: '2000', key: 'CUSTOMER_WALLET' },
   { code: '3000', name: 'حقوق الملكية', type: 'EQUITY', group: true },
   { code: '3100', name: 'رأس المال', type: 'EQUITY', parent: '3000', key: 'CAPITAL' },
   { code: '3200', name: 'الأرباح المحتجزة', type: 'EQUITY', parent: '3000', key: 'RETAINED' },
@@ -50,7 +52,14 @@ export async function seedAccounts(tx: Tx = db) {
   }
 }
 
-export const methodAccount = (method: string) => (method === 'CASH' ? 'CASH' : method === 'CREDIT' ? 'AR' : method === 'LOYALTY' ? 'LOYALTY' : 'BANK');
+// ربط طرق الدفع بالحسابات: المدمجة ثابتة، والمخصصة من جدول طرق الدفع
+const BUILTIN_ACCOUNTS: Record<string, string> = { CASH: 'CASH', CARD: 'BANK', BANK_TRANSFER: 'BANK', CREDIT: 'AR', LOYALTY: 'LOYALTY', WALLET: 'CUSTOMER_WALLET' };
+const methodCache = new Map<string, string>();
+export function setMethodAccounts(rows: Array<{ code: string; accountKey: string }>) {
+  methodCache.clear();
+  rows.forEach((r) => methodCache.set(r.code, r.accountKey));
+}
+export const methodAccount = (method: string) => BUILTIN_ACCOUNTS[method] ?? methodCache.get(method) ?? 'APP_RECEIVABLE';
 
 export interface EntryLine { key?: string; accountId?: number; debit?: number; credit?: number; memo?: string }
 

@@ -1,7 +1,7 @@
 // نوافذ نقطة البيع: الدفع، العميل، الخصم، البند اليدوي، الوحدات، الوزن، الوردية، المعلّقة، فحص السعر، الصرف الداخلي
 import { useEffect, useMemo, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Banknote, CreditCard, Landmark, Clock, Trash2, Printer, Plus } from 'lucide-react';
+import { Banknote, CreditCard, Landmark, Clock, Trash2, Printer, Plus, Wallet2, CalendarClock, Bike, Globe, CircleDollarSign } from 'lucide-react';
 import { api } from '../../lib/api';
 import { money, dateTime, time, PAYMENT_LABELS } from '../../lib/format';
 import { Badge, Button, Checkbox, Empty, Input, Modal, NumberInput, Segmented, Select, Spinner, Textarea, clsx, useDebounced, useToast } from '../../components/ui';
@@ -9,30 +9,42 @@ import type { Customer, LookupResult, Shift } from './types';
 import { CustomerForm } from '../../pages/customers/CustomerForm';
 import { printHtml } from '../print/receipt';
 
-export type PayLine = { method: 'CASH' | 'CARD' | 'BANK_TRANSFER' | 'CREDIT'; amount: number };
+export type PayLine = { method: string; amount: number };
+export interface PayMethod { id: number; code: string; name: string; kind: string; active: boolean; sortOrder: number }
+const ICONS: Record<string, JSX.Element> = { CASH: <Banknote className="size-5" />, CARD: <CreditCard className="size-5" />, TRANSFER: <Landmark className="size-5" />, CREDIT: <Clock className="size-5" />, WALLET: <Wallet2 className="size-5" />, BNPL: <CalendarClock className="size-5" />, DELIVERY_APP: <Bike className="size-5" />, ONLINE: <Globe className="size-5" />, OTHER: <CircleDollarSign className="size-5" /> };
 
-// ===== الدفع =====
-export function PaymentModal({ open, onClose, total, hasCustomer, onPay, loading, showPad = true }: { open: boolean; onClose: () => void; total: number; hasCustomer: boolean; onPay: (p: PayLine[]) => void; loading: boolean; showPad?: boolean }) {
+export function usePayMethods() {
+  return useQuery({ queryKey: ['payment-methods'], queryFn: () => api<PayMethod[]>('/payment-methods'), staleTime: 60_000 });
+}
+
+// ===== الدفع (طرق دفع ديناميكية: نقدي، شبكة، محفظة، تطبيقات التوصيل، تقسيط…) =====
+export function PaymentModal({ open, onClose, total, customer, onPay, loading, showPad = true }: { open: boolean; onClose: () => void; total: number; customer: Customer | null; onPay: (p: PayLine[]) => void; loading: boolean; showPad?: boolean }) {
+  const { data: methodsAll } = usePayMethods();
+  const methods = (methodsAll ?? []).filter((m) => m.active);
   const [pays, setPays] = useState<PayLine[]>([]);
-  const [method, setMethod] = useState<PayLine['method']>('CASH');
+  const [method, setMethod] = useState('CASH');
   const [amount, setAmount] = useState<number | null>(null);
+  const { data: wallet } = useQuery({ queryKey: ['wallet', customer?.id], queryFn: () => api<{ walletBalance: number }>(`/customers/${customer!.id}/wallet`), enabled: open && !!customer });
   useEffect(() => { if (open) { setPays([]); setMethod('CASH'); setAmount(total); } }, [open, total]);
   const paid = pays.reduce((s, p) => s + p.amount, 0);
   const remaining = Math.max(0, Math.round((total - paid) * 100) / 100);
   const change = Math.max(0, Math.round((paid - total) * 100) / 100);
+  const needsCustomer = (code: string) => code === 'CREDIT' || code === 'WALLET';
+  const pick = (code: string) => {
+    setMethod(code);
+    if (code === 'WALLET') setAmount(Math.min(remaining, wallet?.walletBalance ?? 0));
+    else if (code !== 'CASH') setAmount(remaining);
+  };
   const add = (m = method, a = amount ?? 0) => {
     if (a <= 0) return;
     if (m !== 'CASH' && a > remaining + 0.001) return;
     setPays((p) => [...p, { method: m, amount: a }]); setAmount(Math.max(0, Math.round((remaining - a) * 100) / 100));
   };
   const finish = (list = pays) => onPay(list);
+  const name = (code: string) => methods.find((m) => m.code === code)?.name ?? PAYMENT_LABELS[code] ?? code;
   const quick = [...new Set([remaining, Math.ceil(remaining), Math.ceil(remaining / 5) * 5, Math.ceil(remaining / 10) * 10, Math.ceil(remaining / 50) * 50, Math.ceil(remaining / 100) * 100])].filter((x) => x > 0).slice(0, 5);
-  const methods: Array<{ v: PayLine['method']; label: string; icon: JSX.Element }> = [
-    { v: 'CASH', label: 'نقدي', icon: <Banknote className="size-5" /> }, { v: 'CARD', label: 'شبكة', icon: <CreditCard className="size-5" /> },
-    { v: 'BANK_TRANSFER', label: 'تحويل', icon: <Landmark className="size-5" /> }, { v: 'CREDIT', label: 'آجل', icon: <Clock className="size-5" /> },
-  ];
   return (
-    <Modal open={open} onClose={onClose} title="الدفع" size="md"
+    <Modal open={open} onClose={onClose} title="الدفع" size="lg"
       footer={<><Button variant="secondary" onClick={onClose}>إلغاء</Button>
         <Button size="lg" loading={loading}
           onClick={() => finish(pays.length ? (remaining > 0 && amount ? [...pays, { method, amount }] : pays) : [{ method, amount: amount ?? 0 }])}>
@@ -40,16 +52,17 @@ export function PaymentModal({ open, onClose, total, hasCustomer, onPay, loading
       <div className="rounded-xl bg-brand-50 p-4 flex items-center justify-between mb-4">
         <span className="text-brand-800">المطلوب</span><span className="text-3xl font-extrabold num text-brand-900">{money(total)}</span>
       </div>
-      <div className="grid grid-cols-4 gap-2 mb-4" role="radiogroup" aria-label="طريقة الدفع">
+      <div className="grid grid-cols-3 sm:grid-cols-5 gap-2 mb-3" role="radiogroup" aria-label="طريقة الدفع">
         {methods.map((m) => (
-          <button key={m.v} role="radio" aria-checked={method === m.v} disabled={m.v === 'CREDIT' && !hasCustomer}
-            onClick={() => { setMethod(m.v); if (m.v === 'CREDIT') setAmount(remaining); }}
-            className={clsx('flex flex-col items-center gap-1 rounded-xl border p-3 text-sm transition disabled:opacity-40', method === m.v ? 'border-brand-600 bg-brand-50 text-brand-800 font-bold' : 'border-ink-200 hover:bg-ink-50')}>
-            {m.icon}{m.label}
+          <button key={m.code} role="radio" aria-checked={method === m.code} disabled={needsCustomer(m.code) && !customer}
+            onClick={() => pick(m.code)}
+            className={clsx('flex flex-col items-center gap-1 rounded-xl border p-2.5 text-[13px] transition disabled:opacity-40', method === m.code ? 'border-brand-600 bg-brand-50 text-brand-800 font-bold' : 'border-ink-200 hover:bg-ink-50')}>
+            {ICONS[m.kind] ?? ICONS.OTHER}{m.name}
           </button>
         ))}
       </div>
-      {!hasCustomer && <p className="text-[13px] text-ink-500 -mt-2 mb-3">البيع الآجل يتطلب اختيار العميل.</p>}
+      {!customer && <p className="text-[13px] text-ink-500 mb-3">البيع الآجل والدفع من المحفظة يتطلبان اختيار العميل.</p>}
+      {customer && wallet && <p className="text-[13px] text-ink-600 mb-3">رصيد محفظة {customer.name}: <b className="num">{money(wallet.walletBalance)}</b></p>}
       <div className="flex gap-2 items-end">
         <NumberInput label="المبلغ" value={amount} onChange={setAmount} className="!h-12 !text-xl" onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); if (pays.length === 0 && amount && amount >= total) finish([{ method, amount }]); else add(); } }} />
         <Button variant="secondary" className="!h-12" onClick={() => add()}>إضافة دفعة</Button>
@@ -63,7 +76,7 @@ export function PaymentModal({ open, onClose, total, hasCustomer, onPay, loading
         <ul className="mt-4 divide-y divide-ink-100 border border-ink-200 rounded-lg">
           {pays.map((p, i) => (
             <li key={i} className="flex items-center justify-between px-3 py-2">
-              <span>{PAYMENT_LABELS[p.method]}</span>
+              <span>{name(p.method)}</span>
               <span className="flex items-center gap-2"><span className="num font-bold">{money(p.amount)}</span>
                 <button aria-label="حذف الدفعة" className="text-ink-400 hover:text-red-600" onClick={() => setPays((l) => l.filter((_, j) => j !== i))}><Trash2 className="size-4" /></button></span>
             </li>

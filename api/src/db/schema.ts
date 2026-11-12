@@ -104,6 +104,7 @@ export const products = pgTable('products', {
   shortDescription: text('short_description'),
   tags: jsonb('tags').$type<string[]>().notNull().default([]),
   image: text('image'),
+  isFavorite: boolean('is_favorite').notNull().default(false),
   active: boolean('active').notNull().default(true),
   createdAt: createdAt(),
   updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
@@ -191,6 +192,8 @@ export const customers = pgTable('customers', {
   lat: doublePrecision('lat'),
   lng: doublePrecision('lng'),
   loyaltyPoints: money('loyalty_points').notNull().default(0),
+  walletBalance: money('wallet_balance').notNull().default(0),
+  priceListId: integer('price_list_id'),
   notes: text('notes'),
   createdAt: createdAt(),
 }, (t) => [index('customers_phone_idx').on(t.phone)]);
@@ -243,6 +246,11 @@ export const invoices = pgTable('invoices', {
   offerDiscount: money('offer_discount').notNull().default(0),
   loyaltyUsed: money('loyalty_used').notNull().default(0),
   isEmployeeSale: boolean('is_employee_sale').notNull().default(false),
+  orderType: text('order_type'), // DINE_IN | TAKEAWAY | DELIVERY
+  orderNo: integer('order_no'),
+  tableId: integer('table_id'),
+  priceListId: integer('price_list_id'),
+  rounding: money('rounding').notNull().default(0),
   notes: text('notes'),
   privateNote: text('private_note'),
   returnReason: text('return_reason'),
@@ -294,6 +302,9 @@ export const heldCarts = pgTable('held_carts', {
   userId: integer('user_id').notNull(),
   branchId: integer('branch_id').notNull(),
   label: text('label'),
+  tableId: integer('table_id'),
+  orderType: text('order_type'),
+  orderNo: integer('order_no'),
   data: jsonb('data').notNull(),
   createdAt: createdAt(),
 });
@@ -486,3 +497,104 @@ export const counters = pgTable('counters', {
   key: text('key').primaryKey(),
   value: integer('value').notNull().default(0),
 });
+
+// ===== مزايا المطاعم والكاشير المتقدمة =====
+export const restaurantTables = pgTable('restaurant_tables', {
+  id: serial('id').primaryKey(),
+  branchId: integer('branch_id').notNull(),
+  name: text('name').notNull(),
+  area: text('area'),
+  seats: integer('seats').notNull().default(4),
+  active: boolean('active').notNull().default(true),
+  sortOrder: integer('sort_order').notNull().default(0),
+});
+
+export const priceLists = pgTable('price_lists', {
+  id: serial('id').primaryKey(),
+  name: text('name').notNull(),
+  adjustPercent: numeric('adjust_percent', { precision: 6, scale: 2, mode: 'number' }).notNull().default(0), // −10 = خصم 10% على كل المنتجات
+  active: boolean('active').notNull().default(true),
+  createdAt: createdAt(),
+});
+
+export const priceListItems = pgTable('price_list_items', {
+  id: serial('id').primaryKey(),
+  priceListId: integer('price_list_id').notNull().references(() => priceLists.id, { onDelete: 'cascade' }),
+  productId: integer('product_id').notNull().references(() => products.id, { onDelete: 'cascade' }),
+  unitId: integer('unit_id'),
+  price: money('price').notNull(),
+}, (t) => [index('pli_list_product').on(t.priceListId, t.productId)]);
+
+export const kitchenStations = pgTable('kitchen_stations', {
+  id: serial('id').primaryKey(),
+  name: text('name').notNull(),
+  categoryIds: jsonb('category_ids').$type<number[]>().notNull().default([]), // فارغة = كل التصنيفات
+  printer: text('printer'), // اسم الطابعة في مساعد الطباعة أو IP:9100
+  showOnScreen: boolean('show_on_screen').notNull().default(true),
+  active: boolean('active').notNull().default(true),
+});
+
+export const kitchenOrders = pgTable('kitchen_orders', {
+  id: serial('id').primaryKey(),
+  branchId: integer('branch_id').notNull(),
+  stationId: integer('station_id'),
+  invoiceId: integer('invoice_id'),
+  heldCartId: integer('held_cart_id'),
+  orderNo: integer('order_no'),
+  orderType: text('order_type'),
+  tableName: text('table_name'),
+  customerName: text('customer_name'),
+  items: jsonb('items').$type<Array<{ name: string; qty: number; note?: string | null }>>().notNull(),
+  notes: text('notes'),
+  status: text('status').notNull().default('NEW'), // NEW | PREPARING | READY | SERVED | CANCELLED
+  createdAt: createdAt(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
+}, (t) => [index('kitchen_status_idx').on(t.status, t.createdAt)]);
+
+export const walletTransactions = pgTable('wallet_transactions', {
+  id: serial('id').primaryKey(),
+  customerId: integer('customer_id').notNull(),
+  amount: money('amount').notNull(), // موجب = شحن، سالب = دفع
+  balanceAfter: money('balance_after').notNull(),
+  type: text('type').notNull(), // TOPUP | PAYMENT | REFUND | ADJUST
+  method: text('method'),
+  invoiceId: integer('invoice_id'),
+  note: text('note'),
+  userId: integer('user_id'),
+  createdAt: createdAt(),
+});
+
+export const paymentMethods = pgTable('payment_methods', {
+  id: serial('id').primaryKey(),
+  code: text('code').notNull().unique(),
+  name: text('name').notNull(),
+  kind: text('kind').notNull().default('OTHER'), // CASH | CARD | TRANSFER | CREDIT | WALLET | BNPL | DELIVERY_APP | ONLINE | OTHER
+  accountKey: text('account_key').notNull().default('BANK'),
+  builtIn: boolean('built_in').notNull().default(false),
+  active: boolean('active').notNull().default(true),
+  sortOrder: integer('sort_order').notNull().default(0),
+  commissionPercent: numeric('commission_percent', { precision: 5, scale: 2, mode: 'number' }).notNull().default(0),
+});
+
+export const stocktakes = pgTable('stocktakes', {
+  id: serial('id').primaryKey(),
+  number: text('number').notNull().unique(),
+  branchId: integer('branch_id').notNull(),
+  name: text('name').notNull(),
+  startDate: timestamp('start_date', { withTimezone: true }).notNull(),
+  endDate: timestamp('end_date', { withTimezone: true }).notNull(),
+  status: text('status').notNull().default('OPEN'), // OPEN | APPROVED | CANCELLED
+  notes: text('notes'),
+  userId: integer('user_id'),
+  approvedAt: timestamp('approved_at', { withTimezone: true }),
+  createdAt: createdAt(),
+});
+
+export const stocktakeItems = pgTable('stocktake_items', {
+  id: serial('id').primaryKey(),
+  stocktakeId: integer('stocktake_id').notNull().references(() => stocktakes.id, { onDelete: 'cascade' }),
+  productId: integer('product_id').notNull(),
+  systemQty: qty('system_qty').notNull(),
+  countedQty: qty('counted_qty'),
+  unitCost: cost('unit_cost').notNull().default(0),
+}, (t) => [uniqueIndex('stocktake_product').on(t.stocktakeId, t.productId)]);

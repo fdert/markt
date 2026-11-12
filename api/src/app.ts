@@ -20,6 +20,9 @@ import reportRoutes from './routes/reports.js';
 import marketingRoutes from './routes/marketing.js';
 import rentalRoutes from './routes/rentals.js';
 import settingsRoutes from './routes/settings.js';
+import restaurantRoutes from './routes/restaurant.js';
+import publicRoutes from './routes/public.js';
+import { bootstrap } from './services/bootstrap.js';
 
 export function createApp() {
   const app = express();
@@ -30,8 +33,11 @@ export function createApp() {
   app.use(express.json({ limit: '15mb' }));
   if (process.env.NODE_ENV !== 'test') app.use(morgan('tiny'));
 
+  // تهيئة البيانات المرجعية قبل أول طلب
+  app.use((_req, _res, next) => { bootstrap().then(() => next(), next); });
   app.get('/api/health', (_req, res) => res.json({ ok: true, time: new Date().toISOString() }));
   app.use('/api/auth', authRoutes);
+  app.use('/api/public', publicRoutes);
   app.use('/api', authenticate);
   app.use('/api/users', userRoutes);
   app.use('/api/branches', branchRoutes);
@@ -46,6 +52,7 @@ export function createApp() {
   app.use('/api/marketing', marketingRoutes);
   app.use('/api/rentals', rentalRoutes);
   app.use('/api', settingsRoutes);
+  app.use('/api', restaurantRoutes);
   app.use('/api', (_req, res) => res.status(404).json({ message: 'المسار غير موجود.' }));
   app.use(errorHandler);
   return app;

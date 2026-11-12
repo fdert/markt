@@ -2,7 +2,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { ArrowRight, ScanLine, UserPlus, UserRound, Percent, PauseCircle, ListRestart, History, Settings2, Tag, Trash2, Minus, Plus, PackageOpen, Wallet, PenLine, Gift, X, CheckCircle2, Printer, MoreHorizontal } from 'lucide-react';
+import { ArrowRight, ScanLine, Star, Armchair, MonitorSmartphone, ChefHat, Tags, UserPlus, UserRound, Percent, PauseCircle, ListRestart, History, Settings2, Tag, Trash2, Minus, Plus, PackageOpen, Wallet, PenLine, Gift, X, CheckCircle2, Printer, MoreHorizontal } from 'lucide-react';
 import { api } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { money, qty as fqty } from '../../lib/format';
@@ -12,6 +12,11 @@ import { CustomerModal, DiscountModal, DuplicateModal, HeldModal, IssueModal, Ma
 import { PrinterSettingsModal, usePrinter, useSettings } from '../print/usePrinter';
 import { deviceStore } from '../print/escpos';
 import { InvoiceDrawer } from '../../pages/invoices/InvoiceDrawer';
+import { TablesModal, PriceListModal, type TableRow } from './RestaurantModals';
+import { customerDisplay } from '../print/customerDisplay';
+import { printKitchenTicket } from '../print/escpos';
+import { shortcutStore, keyString, type ShortcutAction } from '../../lib/shortcuts';
+import { normalizeScan } from '../../lib/scan';
 
 interface GridProduct { id: number; name: string; price: number; image: string | null; barcode: string | null; isWeighted: boolean; pricePerWeight: number | null; unlimited: boolean; stock: number; unitsCount: number; type: string; isComposite: boolean; unitName: string }
 type Disc = { discount: { type: 'AMOUNT' | 'PERCENT'; value: number } | null; coupon: string; points: number };
@@ -35,7 +40,12 @@ export default function PosPage() {
   const [heldId, setHeldId] = useState<number | null>(null);
   const [search, setSearch] = useState(''); const dSearch = useDebounced(search, 250);
   const [category, setCategory] = useState<number | null>(null);
-  const [modal, setModal] = useState<null | 'pay' | 'customer' | 'discount' | 'manual' | 'price' | 'held' | 'recent' | 'shift' | 'printer' | 'issue' | 'notes' | 'more'>(null);
+  const [modal, setModal] = useState<null | 'pay' | 'customer' | 'discount' | 'manual' | 'price' | 'held' | 'recent' | 'shift' | 'printer' | 'issue' | 'notes' | 'more' | 'tables' | 'pricelist'>(null);
+  const [orderType, setOrderType] = useState<'DINE_IN' | 'TAKEAWAY' | 'DELIVERY'>('TAKEAWAY');
+  const [table, setTable] = useState<TableRow | null>(null);
+  const [orderNo, setOrderNo] = useState<number | null>(null);
+  const [priceList, setPriceList] = useState<{ id: number; name: string } | null>(null);
+  const [kitchenSent, setKitchenSent] = useState<Record<string, number>>({});
   const [unitsFor, setUnitsFor] = useState<number | null>(null);
   const [weightFor, setWeightFor] = useState<GridProduct | null>(null);
   const [dupes, setDupes] = useState<LookupResult[]>([]);
@@ -43,11 +53,13 @@ export default function PosPage() {
   const [viewInvoice, setViewInvoice] = useState<number | null>(null);
   const [mobileCart, setMobileCart] = useState(false);
 
-  const posSettings = settings?.pos as { requireCustomer?: boolean; allowManualDiscount?: boolean; loyalty?: { enabled: boolean } } | undefined;
+  const posSettings = settings?.pos as { requireCustomer?: boolean; allowManualDiscount?: boolean; loyalty?: { enabled: boolean }; orderTypes?: { enabled: boolean; default: 'DINE_IN' | 'TAKEAWAY' | 'DELIVERY' }; tablesEnabled?: boolean; kitchen?: { enabled: boolean; sendOn: 'CREATE' | 'HOLD' | 'BOTH' }; allowFractionalQty?: boolean } | undefined;
+  useEffect(() => { if (posSettings?.orderTypes?.default) setOrderType(posSettings.orderTypes.default); }, [posSettings?.orderTypes?.default]);
+  const [favorites, setFavorites] = useState(false);
 
   // البيانات
   const { data: categories } = useQuery({ queryKey: ['categories'], queryFn: () => api<Array<{ id: number; name: string; parentId: number | null; active: boolean }>>('/categories') });
-  const { data: products } = useQuery({ queryKey: ['pos-products', branchId, category, dSearch], queryFn: () => api<GridProduct[]>('/pos/products', { query: { branchId, categoryId: category, search: dSearch, limit: 80 } }), enabled: !!branchId });
+  const { data: products } = useQuery({ queryKey: ['pos-products', branchId, category, dSearch, favorites], queryFn: () => api<GridProduct[]>('/pos/products', { query: { branchId, categoryId: category, search: dSearch, limit: 80, favorites: favorites ? 1 : undefined } }), enabled: !!branchId });
   const { data: shift } = useQuery({ queryKey: ['shift', branchId], queryFn: () => api<Shift | null>('/pos/shift/current', { query: { branchId } }), enabled: !!branchId });
   const { data: offers } = useQuery({ queryKey: ['pos-offers'], queryFn: () => api<Array<{ id: number; name: string; badge: string | null }>>('/pos/offers') });
 
@@ -56,7 +68,8 @@ export default function PosPage() {
     branchId, customerId: customer?.id ?? null, kind, isEmployeeSale: employeeSale,
     lines: lines.map((l) => ({ productId: l.productId, unitId: l.unitId, qty: l.qty, price: l.priceOverride || l.manual ? l.price : undefined, name: l.manual ? l.name : undefined, taxable: l.manual?.taxable, lineDiscount: l.lineDiscount })),
     discount: disc.discount, couponCode: disc.coupon || null, loyaltyPoints: disc.points || undefined,
-  }), [branchId, customer, kind, employeeSale, lines, disc]);
+    priceListId: priceList?.id ?? null,
+  }), [branchId, customer, kind, employeeSale, lines, disc, priceList]);
   const dPayload = useDebounced(payload, 200);
   const { data: preview, error: previewError } = useQuery({ queryKey: ['preview', dPayload], queryFn: () => api<Preview>('/pos/preview', { body: dPayload }), enabled: dPayload.lines.length > 0, retry: false, placeholderData: (p) => p });
   const localTotal = lines.reduce((s, l) => s + l.qty * l.price, 0);
@@ -78,7 +91,7 @@ export default function PosPage() {
   }, [addLine, toast]);
 
   const scan = useCallback(async (code: string) => {
-    code = code.trim(); if (!code) return;
+    code = normalizeScan(code); if (!code) return;
     try {
       const res = await api<LookupResult[]>('/products/lookup', { query: { code, branchId } });
       if (!res.length) { setSearch(code); toast.error('لا يوجد منتج بهذا الباركود.'); return; }
@@ -96,13 +109,40 @@ export default function PosPage() {
 
   const updateQty = (key: string, q: number) => setLines((cur) => q <= 0 ? cur.filter((l) => l.key !== key) : cur.map((l) => (l.key === key ? { ...l, qty: Math.round(q * 1000) / 1000 } : l)));
   const removeLine = (key: string) => setLines((cur) => { const i = cur.findIndex((l) => l.key === key); const next = cur.filter((l) => l.key !== key); setSelected(next[Math.max(0, i - 1)]?.key ?? null); return next; });
-  const reset = () => { setLines([]); setCustomer(null); setKind('SIMPLIFIED'); setDisc({ discount: null, coupon: '', points: 0 }); setNotes(''); setEmployeeSale(false); setHeldId(null); setSelected(null); searchRef.current?.focus(); };
+  const reset = () => { setLines([]); setCustomer(null); setKind('SIMPLIFIED'); setDisc({ discount: null, coupon: '', points: 0 }); setNotes(''); setEmployeeSale(false); setHeldId(null); setSelected(null); setTable(null); setOrderNo(null); setPriceList(null); setKitchenSent({}); setOrderType(posSettings?.orderTypes?.default ?? 'TAKEAWAY'); searchRef.current?.focus(); };
+
+  // إرسال الجديد فقط من البنود إلى المطبخ وطباعة تذاكر الأقسام
+  const sendKitchen = async (no: number | null, extra: { invoiceId?: number; heldCartId?: number } = {}) => {
+    if (!posSettings?.kitchen?.enabled) return;
+    const delta = lines.map((l) => ({ l, q: Math.round((l.qty - (kitchenSent[l.key] ?? 0)) * 1000) / 1000 })).filter((x) => x.q > 0);
+    if (!delta.length) return;
+    try {
+      const r = await api<{ orders: Array<{ id: number; items: Array<{ name: string; qty: number }>; createdAt: string; tableName: string | null; station: { name: string; printer: string | null } }> }>('/kitchen/send', { body: {
+        branchId, orderNo: no, orderType, tableId: table?.id ?? null, customerName: customer?.name ?? null, notes: notes || null, ...extra,
+        lines: delta.map(({ l, q }) => ({ productId: l.productId, name: l.name, qty: q })) } });
+      setKitchenSent(Object.fromEntries(lines.map((l) => [l.key, l.qty])));
+      const dev = deviceStore.get();
+      if (dev.printKitchenTickets && dev.method === 'AGENT') for (const o of r.orders) if (o.station.printer) printKitchenTicket({ stationName: o.station.name, orderNo: no, orderType, tableName: o.tableName, customerName: customer?.name, notes, items: o.items, createdAt: o.createdAt }, o.station.printer, dev).catch(toast.error);
+      if (r.orders.length) toast.success(`أُرسل الطلب إلى المطبخ (${r.orders.length} قسم).`);
+    } catch (e) { toast.error(e); }
+  };
+  const resumeHeld = (d: unknown, id: number) => {
+    const data = d as { lines: CartLine[]; customer: Customer | null; disc: Disc; notes: string; kind: 'SIMPLIFIED' | 'STANDARD'; orderType?: 'DINE_IN' | 'TAKEAWAY' | 'DELIVERY'; table?: TableRow | null; orderNo?: number | null; priceList?: { id: number; name: string } | null; kitchenSent?: Record<string, number> };
+    const keyMap: Record<string, string> = {};
+    const nl = data.lines.map((l) => { const k = newKey(); keyMap[l.key] = k; return { ...l, key: k }; });
+    setLines(nl); setCustomer(data.customer); setDisc(data.disc ?? { discount: null, coupon: '', points: 0 }); setNotes(data.notes ?? ''); setKind(data.kind ?? 'SIMPLIFIED'); setHeldId(id);
+    setOrderType(data.orderType ?? 'TAKEAWAY'); setTable(data.table ?? null); setOrderNo(data.orderNo ?? null); setPriceList(data.priceList ?? null);
+    setKitchenSent(Object.fromEntries(Object.entries(data.kitchenSent ?? {}).map(([k, v]) => [keyMap[k] ?? k, v])));
+  };
+  const ensureOrderNo = async () => orderNo ?? (await api<{ orderNo: number }>('/pos/order-number', { body: { branchId } }).then((r) => { setOrderNo(r.orderNo); return r.orderNo; }));
 
   // إصدار الفاتورة
   const issue = useMutation({
-    mutationFn: (payments: PayLine[]) => api<{ id: number; number: string; total: number; change: number } & Record<string, unknown>>('/invoices', { body: { ...payload, payments, notes: notes || null } }),
+    mutationFn: (payments: PayLine[]) => api<{ id: number; number: string; total: number; change: number; orderNo: number | null } & Record<string, unknown>>('/invoices', { body: { ...payload, payments, notes: notes || null, orderType: posSettings?.orderTypes?.enabled === false ? null : orderType, tableId: table?.id ?? null, orderNo } }),
     onSuccess: async (inv) => {
       setModal(null);
+      if (posSettings?.kitchen?.sendOn !== 'HOLD') await sendKitchen(inv.orderNo, { invoiceId: inv.id });
+      customerDisplay.publish({ storeName: me?.store.name ?? '', lines: [], subtotal: 0, tax: 0, discount: 0, rounding: 0, total: inv.total, status: 'PAID', change: inv.change, message: 'شكراً لزيارتكم' });
       if (heldId) api(`/pos/held/${heldId}`, { method: 'DELETE' }).catch(() => undefined);
       qc.invalidateQueries({ queryKey: ['shift'] }); qc.invalidateQueries({ queryKey: ['pos-products'] });
       const dev = deviceStore.get();
@@ -114,7 +154,7 @@ export default function PosPage() {
     },
     onError: toast.error,
   });
-  const quickPay = (method: 'CASH' | 'CARD') => { if (!lines.length) return; if (posSettings?.requireCustomer && !customer) { setModal('customer'); return; } issue.mutate([{ method, amount: total }]); };
+  const quickPay = (method: string) => { if (!lines.length) return; if (posSettings?.requireCustomer && !customer) { setModal('customer'); return; } issue.mutate([{ method, amount: total }]); };
   const openPay = () => {
     if (!lines.length) return toast.error('السلة فارغة. أضف منتجاً واحداً على الأقل.');
     if (previewError) return toast.error(previewError);
@@ -123,8 +163,17 @@ export default function PosPage() {
   };
 
   const hold = useMutation({
-    mutationFn: () => api('/pos/held', { body: { branchId, label: customer?.name ?? null, data: { lines, customer, disc, notes, kind } } }),
-    onSuccess: () => { toast.success('تم تعليق الفاتورة.'); reset(); qc.invalidateQueries({ queryKey: ['held'] }); }, onError: toast.error,
+    mutationFn: async () => {
+      const no = posSettings?.kitchen?.enabled || table ? await ensureOrderNo() : orderNo;
+      // ما سيُرسَل للمطبخ الآن يُحفظ مع السلة حتى لا يتكرر عند استئنافها
+      const willSend = posSettings?.kitchen?.enabled && posSettings.kitchen.sendOn !== 'CREATE';
+      const sentAfter = willSend ? Object.fromEntries(lines.map((l) => [l.key, l.qty])) : kitchenSent;
+      const row = await api<{ id: number }>('/pos/held', { body: { branchId, label: table?.name ?? customer?.name ?? null, tableId: table?.id ?? null, orderType, orderNo: no, data: { lines, customer, disc, notes, kind, orderType, table, orderNo: no, priceList, kitchenSent: sentAfter } } });
+      if (posSettings?.kitchen?.sendOn !== 'CREATE') await sendKitchen(no, { heldCartId: row.id });
+      if (heldId && heldId !== row.id) await api(`/pos/held/${heldId}`, { method: 'DELETE' }).catch(() => undefined);
+      if (deviceStore.get().autoPrintOnHold) printer.print({ id: 0, number: `معلّقة${no ? ` #${no}` : ''}`, kind: 'SIMPLIFIED', type: 'QUOTE', status: 'DRAFT', createdAt: new Date().toISOString(), subtotal: preview?.subtotal ?? 0, discount: preview?.discount ?? 0, taxTotal: preview?.taxTotal ?? 0, total, paid: 0, due: total, orderNo: no, orderType, tableName: table?.name, items: lines.map((l, i) => ({ name: l.name, qty: l.qty, unitPrice: l.price, discount: 0, taxRate: 15, taxAmount: preview?.lines[i]?.taxAmount ?? 0, netAmount: 0, total: preview?.lines[i]?.total ?? l.qty * l.price })), payments: [] }).catch(() => undefined);
+    },
+    onSuccess: () => { toast.success(table ? `تم حفظ طلب ${table.name}.` : 'تم تعليق الفاتورة.'); reset(); qc.invalidateQueries({ queryKey: ['held'] }); qc.invalidateQueries({ queryKey: ['tables'] }); }, onError: toast.error,
   });
   const issueInternal = useMutation({
     mutationFn: (v: { reason: string; recipient: string; notes: string }) => api<{ number: string }>('/pos/issue', { body: { branchId, ...v, lines: lines.filter((l) => l.productId).map((l) => ({ productId: l.productId, unitId: l.unitId, qty: l.qty })) } }),
@@ -133,14 +182,18 @@ export default function PosPage() {
 
   // اختصارات لوحة المفاتيح وقارئ الباركود
   const buffer = useRef({ text: '', last: 0 });
+  const [shortcuts] = useState(shortcutStore.get);
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (document.querySelector('[role=dialog]')) return;
-      const keyMap: Record<string, () => void> = {
-        F2: () => setModal('price'), F3: () => selected && removeLine(selected), F4: openPay, F6: () => setModal('manual'),
-        F7: () => setModal('discount'), F8: () => quickPay('CASH'), F9: () => quickPay('CARD'), F10: () => lines.length && hold.mutate(),
+      const actions: Record<ShortcutAction, () => void> = {
+        priceCheck: () => setModal('price'), removeLine: () => selected && removeLine(selected), pay: openPay, manualItem: () => setModal('manual'),
+        discount: () => setModal('discount'), quickCash: () => quickPay('CASH'), quickCard: () => quickPay('CARD'), hold: () => lines.length && hold.mutate(),
+        customer: () => setModal('customer'), tables: () => setModal('tables'), held: () => setModal('held'), newSale: () => reset(),
       };
-      if (keyMap[e.key]) { e.preventDefault(); keyMap[e.key](); return; }
+      const pressed = keyString(e);
+      const hit = (Object.entries(shortcuts) as Array<[ShortcutAction, string]>).find(([, k]) => k && k === pressed);
+      if (hit) { e.preventDefault(); actions[hit[0]](); return; }
       const target = e.target as HTMLElement;
       const inField = target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.tagName === 'SELECT';
       if (target === searchRef.current) {
@@ -163,6 +216,13 @@ export default function PosPage() {
   }); // يُعاد التسجيل عند كل تحديث للحصول على أحدث الحالة
 
   useEffect(() => { searchRef.current?.focus(); }, []);
+  // تحديث شاشة العميل مع كل تغيير في السلة
+  useEffect(() => {
+    customerDisplay.publish({ storeName: me?.store.name ?? '', status: lines.length ? 'CART' : 'IDLE', total, subtotal: preview?.subtotal ?? 0, tax: preview?.taxTotal ?? 0, discount: preview?.discount ?? 0, rounding: (preview as { rounding?: number } | undefined)?.rounding ?? 0,
+      lines: lines.map((l, i) => ({ name: l.name, qty: l.qty, total: preview?.lines[i]?.total ?? l.qty * l.price })) });
+  }, [lines, preview, total, me?.store.name]);
+  // مجموعة أسعار العميل تُطبَّق تلقائياً
+  useEffect(() => { const pl = (customer as { priceListId?: number | null } | null)?.priceListId; if (pl) api<{ id: number; name: string }>(`/price-lists/${pl}`).then(setPriceList).catch(() => undefined); }, [customer]);
   const rootCats = (categories ?? []).filter((c) => c.active && !c.parentId);
   const lineInfo = (i: number) => preview?.lines[i];
 
@@ -181,6 +241,9 @@ export default function PosPage() {
         <Button variant="ghost" size="sm" onClick={() => setModal('price')}><Tag className="size-4" /><span className="hidden lg:inline">فحص السعر</span><kbd className="hidden lg:inline text-xs text-ink-400">F2</kbd></Button>
         <IconButton label="الفواتير المعلّقة" onClick={() => setModal('held')}><ListRestart className="size-5" /></IconButton>
         <IconButton label="آخر الفواتير" onClick={() => setModal('recent')}><History className="size-5" /></IconButton>
+        {posSettings?.tablesEnabled && <IconButton label="الطاولات" onClick={() => setModal('tables')}><Armchair className="size-5" /></IconButton>}
+        {posSettings?.kitchen?.enabled && <IconButton label="شاشة المطبخ" onClick={() => window.open('/kitchen', 'raseed-kitchen')}><ChefHat className="size-5" /></IconButton>}
+        <IconButton label="شاشة العميل" onClick={() => customerDisplay.open()}><MonitorSmartphone className="size-5" /></IconButton>
         <IconButton label="إعدادات الطباعة" onClick={() => setModal('printer')}><Settings2 className="size-5" /></IconButton>
       </header>
 
@@ -206,7 +269,8 @@ export default function PosPage() {
             </Button>
           </div>
           <div className="flex gap-2 overflow-x-auto pb-1 -mx-1 px-1" role="tablist" aria-label="التصنيفات">
-            <button role="tab" aria-selected={category === null} onClick={() => setCategory(null)} className={clsx('shrink-0 rounded-lg px-4 h-9 text-sm font-medium border', category === null ? 'bg-brand-700 text-white border-brand-700' : 'bg-white border-ink-200 hover:bg-ink-50')}>الكل</button>
+            <button role="tab" aria-selected={favorites} onClick={() => { setFavorites((f) => !f); setCategory(null); }} className={clsx('shrink-0 rounded-lg px-4 h-9 text-sm font-medium border inline-flex items-center gap-1', favorites ? 'bg-amber-500 text-white border-amber-500' : 'bg-white border-ink-200 hover:bg-ink-50')}><Star className="size-4" />المفضلة</button>
+            <button role="tab" aria-selected={category === null && !favorites} onClick={() => { setCategory(null); setFavorites(false); }} className={clsx('shrink-0 rounded-lg px-4 h-9 text-sm font-medium border', category === null ? 'bg-brand-700 text-white border-brand-700' : 'bg-white border-ink-200 hover:bg-ink-50')}>الكل</button>
             {rootCats.map((c) => (
               <button key={c.id} role="tab" aria-selected={category === c.id} onClick={() => setCategory(c.id)} className={clsx('shrink-0 rounded-lg px-4 h-9 text-sm font-medium border', category === c.id ? 'bg-brand-700 text-white border-brand-700' : 'bg-white border-ink-200 hover:bg-ink-50')}>{c.name}</button>
             ))}
@@ -244,6 +308,14 @@ export default function PosPage() {
               <IconButton label="إغلاق السلة" className="lg:hidden" onClick={() => setMobileCart(false)}><X className="size-5" /></IconButton>
             </div>
           </div>
+          {posSettings?.orderTypes?.enabled !== false && (
+            <div className="px-3 pt-2 flex items-center gap-2 flex-wrap">
+              <Segmented value={orderType} onChange={(v) => { setOrderType(v); if (v === 'DINE_IN' && posSettings?.tablesEnabled && !table) setModal('tables'); if (v !== 'DINE_IN') setTable(null); }} items={[{ value: 'DINE_IN', label: 'محلي' }, { value: 'TAKEAWAY', label: 'سفري' }, { value: 'DELIVERY', label: 'توصيل' }]} />
+              {table && <Badge tone="brand"><Armchair className="size-3.5 me-1" />{table.name}</Badge>}
+              {orderNo && <Badge tone="gray">طلب #{orderNo}</Badge>}
+              {priceList && <button onClick={() => setPriceList(null)} title="إزالة مجموعة الأسعار"><Badge tone="amber"><Tags className="size-3.5 me-1" />{priceList.name} ✕</Badge></button>}
+            </div>
+          )}
           {customer && (
             <div className="mx-3 mt-2 flex items-center justify-between rounded-lg bg-brand-50 px-3 py-2 text-sm">
               <span><UserRound className="inline size-4 me-1 text-brand-700" />{customer.name}{customer.vatNumber && <span className="text-ink-500 num"> · {customer.vatNumber}</span>}</span>
@@ -294,6 +366,7 @@ export default function PosPage() {
             <dl className="text-[14px] space-y-1">
               <div className="flex justify-between"><dt className="text-ink-600">قبل الضريبة</dt><dd className="num">{money(preview && lines.length ? preview.subtotal : 0)}</dd></div>
               {preview && preview.discount > 0 && lines.length > 0 && <div className="flex justify-between text-emerald-700"><dt>الخصومات والعروض</dt><dd className="num">−{money(preview.discount)}</dd></div>}
+              {(preview as { rounding?: number } | undefined)?.rounding ? <div className="flex justify-between text-ink-600"><dt>تقريب الفاتورة</dt><dd className="num">{money((preview as unknown as { rounding: number }).rounding)}</dd></div> : null}
               <div className="flex justify-between"><dt className="text-ink-600">الضريبة</dt><dd className="num">{money(preview && lines.length ? preview.taxTotal : 0)}</dd></div>
             </dl>
             <div className="flex items-center justify-between pt-1"><span className="font-bold text-lg">الإجمالي</span><span className="text-3xl font-extrabold num">{money(total)}</span></div>
@@ -314,15 +387,20 @@ export default function PosPage() {
         </button>
       )}
 
-      <PaymentModal open={modal === 'pay'} onClose={() => setModal(null)} total={total} hasCustomer={!!customer} loading={issue.isPending} onPay={(p) => issue.mutate(p)} />
+      <PaymentModal open={modal === 'pay'} onClose={() => setModal(null)} total={total} customer={customer} loading={issue.isPending} onPay={(p) => issue.mutate(p)} />
+      <TablesModal open={modal === 'tables'} onClose={() => setModal(null)} branchId={branchId} current={table?.id ?? null} onPick={async (t) => {
+        setModal(null);
+        if (t.heldId) {
+          const held = (await api<Array<{ id: number; data: unknown }>>('/pos/held', { query: { branchId } })).find((h) => h.id === t.heldId);
+          if (held) resumeHeld(held.data, held.id);
+        } else { setTable(t); setOrderType('DINE_IN'); }
+      }} />
+      <PriceListModal open={modal === 'pricelist'} onClose={() => setModal(null)} onPick={(pl) => { setPriceList(pl); setModal(null); }} />
       <CustomerModal open={modal === 'customer'} onClose={() => setModal(null)} onSelect={setCustomer} />
       <DiscountModal open={modal === 'discount'} onClose={() => setModal(null)} value={disc} onApply={setDisc} customer={customer} loyaltyEnabled={!!posSettings?.loyalty?.enabled} />
       <ManualItemModal open={modal === 'manual'} onClose={() => setModal(null)} onAdd={(v) => addLine({ productId: null, unitId: null, name: v.name, price: v.price, qty: v.qty, manual: { taxable: v.taxable } })} />
       <PriceCheckModal open={modal === 'price'} onClose={() => setModal(null)} branchId={branchId} />
-      <HeldModal open={modal === 'held'} onClose={() => setModal(null)} branchId={branchId} onResume={(d, id) => {
-        const data = d as { lines: CartLine[]; customer: Customer | null; disc: Disc; notes: string; kind: 'SIMPLIFIED' | 'STANDARD' };
-        setLines(data.lines.map((l) => ({ ...l, key: newKey() }))); setCustomer(data.customer); setDisc(data.disc ?? { discount: null, coupon: '', points: 0 }); setNotes(data.notes ?? ''); setKind(data.kind ?? 'SIMPLIFIED'); setHeldId(id);
-      }} />
+      <HeldModal open={modal === 'held'} onClose={() => setModal(null)} branchId={branchId} onResume={resumeHeld} />
       <RecentModal open={modal === 'recent'} onClose={() => setModal(null)} onOpen={(id) => { setModal(null); setViewInvoice(id); }} />
       <ShiftModal open={modal === 'shift'} onClose={() => setModal(null)} branchId={branchId} shift={shift} />
       <PrinterSettingsModal open={modal === 'printer'} onClose={() => setModal(null)} />
@@ -338,6 +416,9 @@ export default function PosPage() {
       <Modal open={modal === 'more'} onClose={() => setModal(null)} title="خيارات إضافية" size="sm">
         <div className="grid gap-2">
           <Button variant="secondary" onClick={() => setModal('notes')}><PenLine className="size-4" />ملاحظة على الفاتورة{notes && ' ✓'}</Button>
+          <Button variant="secondary" onClick={() => setModal('pricelist')}><Tags className="size-4" />مجموعة الأسعار{priceList ? `: ${priceList.name}` : ''}</Button>
+          {posSettings?.tablesEnabled && <Button variant="secondary" onClick={() => setModal('tables')}><Armchair className="size-4" />الطاولات</Button>}
+          <Link to="/reports/daily" className="btn-secondary">تقرير اليوم (X)</Link>
           <Button variant="secondary" onClick={() => { setEmployeeSale((v) => !v); setModal(null); }}>{employeeSale ? 'إلغاء بيع الموظف' : 'بيع لموظف بسعر التكلفة (المادة 38)'}</Button>
           {can('pos.issue', 'inventory.adjust') && <Button variant="secondary" disabled={!lines.length} onClick={() => setModal('issue')}>صرف السلة داخلياً</Button>}
           <Button variant="secondary" onClick={() => printer.openDrawer().then(() => toast.success('تم فتح الدرج.')).catch(toast.error)}>فتح درج النقود</Button>

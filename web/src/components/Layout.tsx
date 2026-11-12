@@ -1,6 +1,6 @@
 import { useState, type ReactNode } from 'react';
 import { NavLink, Outlet, useLocation, useNavigate, Link } from 'react-router-dom';
-import { LayoutDashboard, ShoppingCart, FileText, BarChart3, Users, Package, Calculator, Truck, KeyRound, Megaphone, Settings, Menu, X, LogOut, Store, ChevronDown, UserRound, Activity, Plus } from 'lucide-react';
+import { ScanQrCode, ChefHat, LayoutDashboard, ShoppingCart, FileText, BarChart3, Users, Package, Calculator, Truck, KeyRound, Megaphone, Settings, Menu, X, LogOut, Store, ChevronDown, UserRound, Activity, Plus } from 'lucide-react';
 import { useAuth } from '../lib/auth';
 import { clsx } from './ui';
 
@@ -9,11 +9,14 @@ const NAV: NavItem[] = [
   { to: '/', label: 'لوحة التحكم', icon: <LayoutDashboard />, perm: ['dashboard.view', 'reports.view'] },
   { to: '/pos', label: 'نقطة البيع', icon: <ShoppingCart />, perm: ['pos.use'] },
   { to: '/invoices', label: 'الفواتير', icon: <FileText />, perm: ['invoices.view', 'pos.use'] },
-  { to: '/reports', label: 'مركز التقارير', icon: <BarChart3 />, perm: ['reports.view'] },
+  { to: '/reports', label: 'مركز التقارير', icon: <BarChart3 />, perm: ['reports.view'], children: [{ to: '/reports', label: 'كل التقارير' }, { to: '/reports/daily', label: 'التقرير اليومي' }] },
+  { to: '/kitchen', label: 'شاشة المطبخ', icon: <ChefHat />, perm: ['pos.use'] },
+  { to: '/tools/qr-reader', label: 'قارئ الفاتورة الإلكترونية', icon: <ScanQrCode /> },
   { to: '/customers', label: 'العملاء', icon: <Users />, perm: ['customers.view'] },
   { to: '/products', label: 'المنتجات والمخزون', icon: <Package />, perm: ['products.view'], children: [
     { to: '/products', label: 'المنتجات' }, { to: '/categories', label: 'التصنيفات' },
-    { to: '/inventory/transfers', label: 'تحويلات المخزون', perm: ['inventory.transfer'] }, { to: '/inventory/reorder', label: 'أوامر الشراء المقترحة' },
+    { to: '/inventory/transfers', label: 'تحويلات المخزون', perm: ['inventory.transfer'] }, { to: '/inventory/stocktakes', label: 'جرد المخزون' },
+    { to: '/inventory/damaged', label: 'المخزون التالف' }, { to: '/inventory/reorder', label: 'أوامر الشراء المقترحة' },
   ] },
   { to: '/accounting', label: 'المحاسبة', icon: <Calculator />, perm: ['accounting.view', 'shifts.manage'], children: [
     { to: '/accounting', label: 'نظرة عامة', perm: ['accounting.view'] }, { to: '/accounting/accounts', label: 'الحسابات والقيود', perm: ['accounting.view'] },

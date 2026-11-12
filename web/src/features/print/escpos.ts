@@ -14,13 +14,16 @@ export interface DeviceSettings {
   autoPrint: boolean;
   skipSuccess: boolean;
   template: 'RECEIPT' | 'A4' | 'COMPACT';
+  autoPrintOnHold: boolean;
+  autoPrintOnReturn: boolean;
+  printKitchenTickets: boolean;
   agentUrl: string;
   agentPrinter: string;
   baudRate: number;
 }
 
 const KEY = 'raseed.printer';
-export const defaultDevice: DeviceSettings = { method: 'BROWSER', paperWidth: 80, cutMode: 'AUTO', openDrawer: false, autoPrint: true, skipSuccess: false, template: 'RECEIPT', agentUrl: 'http://127.0.0.1:17777', agentPrinter: '', baudRate: 9600 };
+export const defaultDevice: DeviceSettings = { method: 'BROWSER', paperWidth: 80, cutMode: 'AUTO', openDrawer: false, autoPrint: true, skipSuccess: false, template: 'RECEIPT', autoPrintOnHold: false, autoPrintOnReturn: true, printKitchenTickets: true, agentUrl: 'http://127.0.0.1:17777', agentPrinter: '', baudRate: 9600 };
 /** تُحفظ إعدادات الطابعة لهذا الجهاز والمتصفح */
 export const deviceStore = {
   get(): DeviceSettings { try { return { ...defaultDevice, ...JSON.parse(localStorage.getItem(KEY) ?? '{}') }; } catch { return defaultDevice; } },
@@ -61,12 +64,14 @@ async function renderCanvas(inv: PrintableInvoice, s: InvoiceSettings, store: St
       ctx.drawImage(img, (W - w) / 2, y, w, h); y += h + 8;
     } catch { /* تجاهل الشعار */ }
   }
-  if (s.showStoreName) center(store.name, base + 8, true);
+  if (s.showStoreName) center(s.printBranchAsTitle && inv.branch ? inv.branch.name : store.name, base + 8, true);
   if (s.showBranch && inv.branch) center(inv.branch.name);
   if (s.showVatNumber && store.vatNumber) center(`الرقم الضريبي: ${store.vatNumber}`);
   if (s.showCr && store.crNumber) center(`السجل التجاري: ${store.crNumber}`);
   hr();
   center(docTitle(inv), base + 2, true);
+  if (s.showOrderNumber !== false && inv.orderNo) center(`طلب رقم ${inv.orderNo}`, base + 16, true);
+  if (s.showOrderType !== false && inv.orderType) center(`${ORDER_TYPES[inv.orderType] ?? ''}${inv.tableName ? ` — ${inv.tableName}` : ''}`, base, true);
   row('رقم الفاتورة', inv.number, base, true);
   row('التاريخ', dateTime(inv.createdAt).replace('، ', ' '));
   if (s.showEmployee && inv.user) row('الكاشير', inv.user.name);
@@ -77,9 +82,11 @@ async function renderCanvas(inv: PrintableInvoice, s: InvoiceSettings, store: St
     row(`${qty(it.qty)} × ${money(it.total / it.qty)}`, money(it.total));
   });
   hr();
+  if (s.printItemCount !== false) row('عدد الأصناف / القطع', `${inv.items.length} / ${qty(inv.items.reduce((a, it) => a + it.qty, 0))}`);
   if (s.showSubtotal) row('قبل الضريبة', money(inv.subtotal));
   if (inv.discount > 0) row('الخصم', money(inv.discount));
   if (s.showTaxAmount) row('ضريبة القيمة المضافة', money(inv.taxTotal));
+  if (inv.rounding) row('تقريب الفاتورة', money(inv.rounding));
   row('الإجمالي', money(inv.total), base + 8, true);
   if (s.showPaymentMethod) inv.payments.filter((p) => p.amount).forEach((p) => row(PAYMENT_LABELS[p.method] ?? p.method, money(Math.abs(p.amount))));
   if (inv.change) row('الباقي', money(inv.change));
@@ -175,4 +182,33 @@ export async function sendRaw(bytes: Uint8Array, dev: DeviceSettings) {
   if (dev.method === 'USB') return sendUsb(bytes);
   if (dev.method === 'AGENT') return sendAgent(bytes, dev);
   throw new Error('طريقة الطباعة الحالية عبر المتصفح.');
+}
+
+// ===== تذكرة المطبخ =====
+export interface KitchenTicket { stationName: string; orderNo?: number | null; orderType?: string | null; tableName?: string | null; customerName?: string | null; notes?: string | null; items: Array<{ name: string; qty: number; note?: string | null }>; createdAt: string }
+const ORDER_TYPES: Record<string, string> = { DINE_IN: 'محلي', TAKEAWAY: 'سفري', DELIVERY: 'توصيل' };
+
+export function renderKitchenCanvas(t: KitchenTicket, widthMm: 58 | 80) {
+  const W = widthMm === 58 ? 384 : 576; const pad = 10; const right = W - pad;
+  const c = document.createElement('canvas'); c.width = W; c.height = 3000;
+  const ctx = c.getContext('2d')!; ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, W, c.height); ctx.fillStyle = '#000'; ctx.direction = 'rtl'; ctx.textBaseline = 'top';
+  let y = 8;
+  const text = (s: string, size: number, bold = false, align: CanvasTextAlign = 'right') => { ctx.font = `${bold ? 800 : 500} ${size}px Tajawal, Tahoma`; ctx.textAlign = align; ctx.fillText(s, align === 'center' ? W / 2 : right, y, W - pad * 2); y += size + 10; };
+  text(t.stationName, 30, true, 'center');
+  if (t.orderNo) text(`طلب رقم ${t.orderNo}`, 44, true, 'center');
+  text([t.orderType ? ORDER_TYPES[t.orderType] ?? t.orderType : '', t.tableName ?? '', t.customerName ?? ''].filter(Boolean).join(' — '), 26, true, 'center');
+  text(new Date(t.createdAt).toLocaleTimeString('ar-SA-u-nu-latn', { hour: '2-digit', minute: '2-digit', timeZone: 'Asia/Riyadh' }), 22, false, 'center');
+  ctx.fillRect(pad, y, W - pad * 2, 3); y += 14;
+  for (const it of t.items) { text(`${it.qty} × ${it.name}`, 30, true); if (it.note) text(`↲ ${it.note}`, 22); }
+  if (t.notes) { ctx.fillRect(pad, y, W - pad * 2, 2); y += 10; text(`ملاحظة: ${t.notes}`, 24, true); }
+  y += 20;
+  const out = document.createElement('canvas'); out.width = W; out.height = Math.ceil(y); out.getContext('2d')!.drawImage(c, 0, 0);
+  return out;
+}
+
+/** طباعة تذكرة المطبخ على طابعة القسم عبر مساعد الطباعة (اسم طابعة أو IP:9100) */
+export async function printKitchenTicket(t: KitchenTicket, printer: string, dev: DeviceSettings) {
+  const canvas = renderKitchenCanvas(t, dev.paperWidth);
+  const bytes = new Uint8Array([0x1b, 0x40, ...rasterBytes(canvas), 0x1b, 0x64, 0x04, 0x1d, 0x56, 0x01]);
+  return sendAgent(bytes, { ...dev, agentPrinter: printer });
 }

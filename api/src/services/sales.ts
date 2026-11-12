@@ -14,7 +14,7 @@ import { postEntry, methodAccount } from './accounting.js';
 import { stampInvoice, submitToZatca } from './zatca/index.js';
 import { isValidVat } from './zatca/qr.js';
 
-export interface PaymentInput { method: 'CASH' | 'CARD' | 'BANK_TRANSFER' | 'CREDIT' | 'OTHER'; amount: number; reference?: string }
+export interface PaymentInput { method: string; amount: number; reference?: string }
 
 export interface CreateInvoiceInput extends CartInput {
   kind?: 'SIMPLIFIED' | 'STANDARD';
@@ -22,6 +22,16 @@ export interface CreateInvoiceInput extends CartInput {
   notes?: string; privateNote?: string; supplyDate?: string | null;
   asDraft?: boolean; asQuote?: boolean;
   shiftId?: number | null;
+  orderType?: 'DINE_IN' | 'TAKEAWAY' | 'DELIVERY' | null;
+  tableId?: number | null;
+  orderNo?: number | null;
+}
+
+/** رقم الطلب اليومي لكل فرع (يبدأ من 1 كل يوم بتوقيت الرياض) */
+export async function nextOrderNo(tx: Tx, branchId: number) {
+  const day = new Date(Date.now() + 3 * 3600000).toISOString().slice(0, 10).replace(/-/g, '');
+  const n = await nextNumber(tx, `order-${branchId}-${day}`, '', 1);
+  return Number(n);
 }
 
 async function openShiftFor(tx: Tx, userId: number, branchId: number) {
@@ -53,6 +63,18 @@ export async function createInvoice(input: CreateInvoiceInput, user: AuthUser) {
 
     // المدفوعات
     const payments = (input.payments ?? []).filter((p) => p.amount > 0);
+    // التحقق من طرق الدفع المفعّلة
+    const methods = await tx.select().from(schema.paymentMethods);
+    for (const p of payments) {
+      const m = methods.find((x) => x.code === p.method);
+      if (!m || !m.active) throw badRequest(`طريقة الدفع «${m?.name ?? p.method}» غير مفعّلة.`);
+    }
+    if (!pos.multiPayment && payments.filter((p) => p.method !== 'CREDIT').length > 1) throw badRequest('الدفع المتعدد غير مفعّل.');
+    const walletPay = r2(payments.filter((p) => p.method === 'WALLET').reduce((s2, p) => s2 + p.amount, 0));
+    if (walletPay > 0) {
+      if (!customer) throw badRequest('الدفع من المحفظة يتطلب اختيار العميل.');
+      if (customer.walletBalance < walletPay - 0.001) throw badRequest(`رصيد محفظة العميل غير كافٍ (${customer.walletBalance.toFixed(2)}).`);
+    }
     const nonCredit = payments.filter((p) => p.method !== 'CREDIT');
     const tendered = r2(nonCredit.reduce((s, p) => s + p.amount, 0));
     let paid = Math.min(tendered, cart.total);
@@ -81,12 +103,14 @@ export async function createInvoice(input: CreateInvoiceInput, user: AuthUser) {
     const shift = isDraft ? null : input.shiftId ? (await tx.select().from(schema.shifts).where(eq(schema.shifts.id, input.shiftId)))[0] ?? null : await openShiftFor(tx, user.id, branch.id);
     const number = input.asQuote ? await nextNumber(tx, 'quote', 'QT-') : isDraft ? await nextNumber(tx, 'draft', 'DR-') : await nextNumber(tx, `inv-${branch.id}`, `INV-${branch.id}-`);
 
+    const orderNo = isDraft ? null : input.orderNo ?? (pos.showOrderNumber ? await nextOrderNo(tx, branch.id) : null);
     const [inv] = await tx.insert(schema.invoices).values({
       number, uuid: randomUUID(), kind, type: input.asQuote ? 'QUOTE' : 'INVOICE', status, channel: input.channel ?? 'POS',
       branchId: branch.id, userId: user.id, customerId: customer?.id ?? null, shiftId: shift?.id ?? null,
       subtotal: cart.subtotal, discount: cart.discount, shipping: input.shipping ?? 0, taxTotal: cart.taxTotal, total: cart.total,
       paid, due, costTotal: cart.costTotal, couponCode: cart.couponCode, offerDiscount: cart.offerDiscount, loyaltyUsed: cart.loyaltyDiscount,
       isEmployeeSale: !!input.isEmployeeSale, notes: input.notes, privateNote: input.privateNote,
+      orderType: input.orderType ?? null, tableId: input.tableId ?? null, priceListId: input.priceListId ?? null, orderNo, rounding: cart.rounding,
       supplyDate: input.supplyDate ? new Date(input.supplyDate) : null,
     }).returning();
 
@@ -119,6 +143,13 @@ export async function createInvoice(input: CreateInvoiceInput, user: AuthUser) {
     }).filter((p) => p.amount > 0);
     if (cart.loyaltyDiscount > 0) payRows.push({ invoiceId: inv.id, shiftId: shift?.id ?? null, method: 'LOYALTY' as never, amount: 0, reference: `${cart.loyaltyPointsUsed} نقطة`, userId: user.id });
     if (payRows.length) await tx.insert(schema.payments).values(payRows);
+
+    // خصم المحفظة
+    if (walletPay > 0 && customer) {
+      const balanceAfter = r2(customer.walletBalance - walletPay);
+      await tx.update(schema.customers).set({ walletBalance: balanceAfter }).where(eq(schema.customers.id, customer.id));
+      await tx.insert(schema.walletTransactions).values({ customerId: customer.id, amount: -walletPay, balanceAfter, type: 'PAYMENT', method: 'WALLET', invoiceId: inv.id, userId: user.id, note: `دفع الفاتورة ${inv.number}` });
+    }
 
     // الكوبون ونقاط الولاء
     if (cart.couponCode) {
@@ -154,7 +185,7 @@ export async function createInvoice(input: CreateInvoiceInput, user: AuthUser) {
   return result;
 }
 
-export interface ReturnInput { items: Array<{ itemId: number; qty: number }>; refundMethod: 'CASH' | 'CARD' | 'BANK_TRANSFER' | 'CREDIT'; reason?: string; restock?: boolean }
+export interface ReturnInput { items: Array<{ itemId: number; qty: number }>; refundMethod: string; reason?: string; restock?: boolean }
 
 export async function returnInvoice(invoiceId: number, input: ReturnInput, user: AuthUser) {
   const result = await db.transaction(async (tx) => {
@@ -206,6 +237,13 @@ export async function returnInvoice(invoiceId: number, input: ReturnInput, user:
     }
     costTotal = r2(costTotal);
     const refundMethod = input.refundMethod === 'CREDIT' || orig.due > 0 ? (orig.due >= total ? 'CREDIT' : input.refundMethod) : input.refundMethod;
+    if (refundMethod === 'WALLET') {
+      if (!orig.customerId) throw badRequest('الاسترداد للمحفظة يتطلب عميلاً على الفاتورة.');
+      const [cu] = await tx.select().from(schema.customers).where(eq(schema.customers.id, orig.customerId));
+      const balanceAfter = r2(cu.walletBalance + total);
+      await tx.update(schema.customers).set({ walletBalance: balanceAfter }).where(eq(schema.customers.id, cu.id));
+      await tx.insert(schema.walletTransactions).values({ customerId: cu.id, amount: total, balanceAfter, type: 'REFUND', method: 'WALLET', invoiceId: cn.id, userId: user.id, note: `استرداد ${cn.number}` });
+    }
     if (refundMethod !== 'CREDIT') await tx.insert(schema.payments).values({ invoiceId: cn.id, shiftId: shift?.id ?? null, method: refundMethod, amount: -total, userId: user.id, note: 'استرداد' });
 
     // تحديث حالة الفاتورة الأصلية والمستحق
@@ -260,9 +298,10 @@ export async function invoiceDetails(id: number) {
     db.select({ id: schema.users.id, name: schema.users.name }).from(schema.users).where(eq(schema.users.id, inv.userId)).then((r) => r[0]),
     db.select({ id: schema.invoices.id, number: schema.invoices.number, total: schema.invoices.total, createdAt: schema.invoices.createdAt }).from(schema.invoices).where(eq(schema.invoices.originalId, id)),
   ]);
+  const tableName = inv.tableId ? (await db.select({ name: schema.restaurantTables.name }).from(schema.restaurantTables).where(eq(schema.restaurantTables.id, inv.tableId)))[0]?.name ?? null : null;
   const original = inv.originalId ? (await db.select({ id: schema.invoices.id, number: schema.invoices.number }).from(schema.invoices).where(eq(schema.invoices.id, inv.originalId)))[0] : null;
   const { zatcaPrivateKey: _k, complianceSecret: _s, productionSecret: _ps, ...safeBranch } = branch;
-  return { ...inv, xml: undefined, items, payments: pays, customer, branch: safeBranch, user, returns, original };
+  return { ...inv, xml: undefined, items, payments: pays, customer, branch: safeBranch, user, returns, original, tableName };
 }
 
 export async function deleteDraft(id: number) {

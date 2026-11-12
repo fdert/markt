@@ -40,6 +40,7 @@ const listCols = {
   customer: sql<string>`(select name from customers c where c.id = ${qcol(I.customerId)})`, customerId: I.customerId,
   user: sql<string>`(select name from users u where u.id = ${qcol(I.userId)})`,
   paymentMethods: sql<string>`(select string_agg(distinct p.method, ',') from payments p where p.invoice_id = ${qcol(I.id)})`,
+  orderType: I.orderType, orderNo: I.orderNo,
 };
 
 r.get('/', can('invoices.view', 'pos.use'), ah(async (req, res) => {
@@ -82,7 +83,8 @@ const createSchema = z.object({
   channel: z.enum(['POS', 'ONLINE', 'ORDER']).default('POS'), lines: z.array(lineSchema).min(1, 'السلة فارغة.'),
   couponCode: z.string().nullish(), discount: z.object({ type: z.enum(['AMOUNT', 'PERCENT']), value: z.number().min(0) }).nullish(),
   loyaltyPoints: z.number().min(0).optional(), shipping: z.number().min(0).optional(), isEmployeeSale: z.boolean().optional(),
-  payments: z.array(z.object({ method: z.enum(['CASH', 'CARD', 'BANK_TRANSFER', 'CREDIT', 'OTHER']), amount: z.number().min(0), reference: z.string().optional() })).default([]),
+  payments: z.array(z.object({ method: z.string().min(2), amount: z.number().min(0), reference: z.string().optional() })).default([]),
+  orderType: z.enum(['DINE_IN', 'TAKEAWAY', 'DELIVERY']).nullish(), tableId: z.number().nullish(), orderNo: z.number().nullish(), priceListId: z.number().nullish(),
   notes: z.string().nullish(), privateNote: z.string().nullish(), supplyDate: z.string().nullish(), asDraft: z.boolean().optional(), asQuote: z.boolean().optional(),
 });
 
@@ -106,7 +108,7 @@ r.get('/:id/xml', can('invoices.view'), ah(async (req, res) => {
 }));
 
 r.post('/:id/return', can('invoices.return'), ah(async (req, res) => {
-  const b = z.object({ items: z.array(z.object({ itemId: z.number(), qty: z.number().min(0) })), refundMethod: z.enum(['CASH', 'CARD', 'BANK_TRANSFER', 'CREDIT']), reason: z.string().optional(), restock: z.boolean().default(true) }).parse(req.body);
+  const b = z.object({ items: z.array(z.object({ itemId: z.number(), qty: z.number().min(0) })), refundMethod: z.enum(['CASH', 'CARD', 'BANK_TRANSFER', 'CREDIT', 'WALLET']), reason: z.string().optional(), restock: z.boolean().default(true) }).parse(req.body);
   const out = await returnInvoice(Number(req.params.id), b, req.user!);
   res.status(201).json(await invoiceDetails(out.creditNote.id));
 }));

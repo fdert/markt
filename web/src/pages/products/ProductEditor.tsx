@@ -11,7 +11,7 @@ export interface ProductForm {
   id?: number; type: string; name: string; nameEn?: string | null; sku?: string | null; barcode?: string | null; categoryId?: number | null; brandId?: number | null; unitName: string;
   price: number | null; cost: number | null; taxIncluded: boolean; taxable: boolean; isWeighted: boolean; pricePerWeight?: number | null; unlimited: boolean; expiryDate?: string | null;
   posEnabled: boolean; onlineEnabled: boolean; requiresShipping: boolean; nonReturnable: boolean; lowStockAlert?: number | null; isComposite: boolean;
-  rentalRate?: number | null; rentalUnit?: string | null; depositAmount?: number | null; description?: string | null; image?: string | null; active: boolean; avgCost?: number;
+  isFavorite?: boolean; rentalRate?: number | null; rentalUnit?: string | null; depositAmount?: number | null; description?: string | null; image?: string | null; active: boolean; avgCost?: number;
   units: Array<{ id?: number; name: string; factor: number; price: number; barcode?: string | null; active: boolean }>;
   recipe: Array<{ componentId: number; qty: number; name?: string; cost?: number; unitName?: string }>;
   stocks?: Array<{ branchId: number; branchName: string; branchType: string; isDefault: boolean; qty: number | null; counted: boolean | null; alertLevel: number | null }>;
@@ -84,6 +84,7 @@ export function ProductEditor({ id, type, onClose }: { id: number | 'new' | null
                 <Toggle checked={f.nonReturnable} onChange={(v) => set('nonReturnable', v)} label="غير قابل للإرجاع" hint="يمنع المرتجع لهذا المنتج (مثل الأطعمة المحضّرة)." />
                 <Toggle checked={f.requiresShipping} onChange={(v) => set('requiresShipping', v)} label="المنتج يتطلب شحناً" />
                 <Toggle checked={f.active} onChange={(v) => set('active', v)} label="المنتج مفعّل" />
+                <Toggle checked={!!f.isFavorite} onChange={(v) => set('isFavorite', v)} label="من المفضلة" hint="يظهر في تبويب «المفضلة» أول شاشة الكاشير." />
               </div>
               <fieldset className="space-y-3">
                 <legend className="font-bold mb-1">المنتج الموزون</legend>

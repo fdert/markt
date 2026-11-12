@@ -24,6 +24,7 @@ export interface CartInput {
   shipping?: number;
   channel?: 'POS' | 'ONLINE' | 'ORDER';
   isEmployeeSale?: boolean;
+  priceListId?: number | null;
   branchId: number;
 }
 
@@ -38,7 +39,7 @@ export interface ComputedCart {
   lines: ComputedLine[];
   subtotal: number; discount: number; offerDiscount: number; couponDiscount: number; manualDiscount: number;
   loyaltyDiscount: number; loyaltyPointsUsed: number; taxTotal: number; total: number; costTotal: number;
-  couponCode: string | null; appliedOffers: string[]; warnings: string[];
+  couponCode: string | null; appliedOffers: string[]; warnings: string[]; rounding: number;
 }
 
 type Product = typeof schema.products.$inferSelect;
@@ -76,6 +77,14 @@ export async function computeCart(tx: Tx, input: CartInput, opts: { maxDiscountP
 
   // 1) تجهيز البنود بالسعر الشامل للضريبة
   type Work = ComputedLine & { product?: Product; rate: number; unitNetPrice: number; extraDiscIncl: number };
+  // مجموعة الأسعار (جملة، موظفين…): سعر خاص للصنف أو نسبة تعديل عامة
+  let priceList: typeof schema.priceLists.$inferSelect | undefined;
+  let listItems: Array<typeof schema.priceListItems.$inferSelect> = [];
+  if (input.priceListId) {
+    [priceList] = await tx.select().from(schema.priceLists).where(eq(schema.priceLists.id, input.priceListId));
+    if (!priceList || !priceList.active) throw badRequest('مجموعة الأسعار غير موجودة أو موقوفة.');
+    listItems = productIds.length ? await tx.select().from(schema.priceListItems).where(and(eq(schema.priceListItems.priceListId, priceList.id), inArray(schema.priceListItems.productId, productIds))) : [];
+  }
   const work: Work[] = input.lines.map((l) => {
     if (l.qty <= 0) throw badRequest('الكمية يجب أن تكون أكبر من صفر.');
     const p = l.productId ? pMap.get(l.productId) : undefined;
@@ -85,7 +94,12 @@ export async function computeCart(tx: Tx, input: CartInput, opts: { maxDiscountP
     const u = l.unitId ? uMap.get(l.unitId) : undefined;
     const rate = rateOf(p ? p.taxable : l.taxable ?? true);
     const taxIncluded = p ? p.taxIncluded : true;
+    if (p && !p.isWeighted && !pos.allowFractionalQty && !Number.isInteger(l.qty)) throw badRequest(`الكمية من «${p.name}» يجب أن تكون عدداً صحيحاً.`);
     let price = l.price ?? (u ? u.price : p?.isWeighted && p.pricePerWeight ? p.pricePerWeight : p?.price ?? 0);
+    if (priceList && p && l.price == null) {
+      const special = listItems.find((x) => x.productId === p.id && (x.unitId ?? null) === (u?.id ?? null));
+      price = special ? special.price : r2(price * (1 + priceList.adjustPercent / 100));
+    }
     const factor = u ? u.factor : 1;
     let unitCost = p ? (p.avgCost || p.cost) * factor : 0;
     // بيع للموظف بسعر التكلفة (المادة 38): يُحسب السعر بالتكلفة
@@ -219,6 +233,29 @@ export async function computeCart(tx: Tx, input: CartInput, opts: { maxDiscountP
     });
   }
 
+  // 8) تقريب الفاتورة: يوزَّع الفرق على البنود فتبقى الضريبة صحيحة والإجمالي مقرباً
+  let rounding = 0;
+  if (pos.rounding.enabled && pos.rounding.step > 0 && !input.isEmployeeSale) {
+    const current = r2(work.reduce((s2, w) => s2 + w.total, 0));
+    const fn = pos.rounding.mode === 'UP' ? Math.ceil : pos.rounding.mode === 'DOWN' ? Math.floor : Math.round;
+    const target = r2(fn(r2(current / pos.rounding.step)) * pos.rounding.step);
+    rounding = r2(target - current);
+    const targets = work.filter((w) => w.productId || w.name !== 'خدمات الشحن');
+    const base = targets.reduce((s2, w) => s2 + w.total, 0);
+    if (rounding !== 0 && base > 0) {
+      let left = rounding;
+      targets.forEach((w, i) => {
+        const share = i === targets.length - 1 ? left : r2(rounding * (w.total / base));
+        left = r2(left - share);
+        const incl = r2(w.total + share);
+        w.netAmount = r2(incl / (1 + w.rate / 100));
+        w.taxAmount = r2(incl - w.netAmount);
+        w.discount = r2(Math.max(0, w.unitNetPrice * w.qty - w.netAmount));
+        w.total = incl;
+      });
+    }
+  }
+
   const lines: ComputedLine[] = work.map(({ product: _p, rate: _r, unitNetPrice: _u, extraDiscIncl: _e, ...rest }) => rest);
   const subtotal = r2(lines.reduce((s, l) => s + l.netAmount, 0));
   const taxTotal = r2(lines.reduce((s, l) => s + l.taxAmount, 0));
@@ -226,6 +263,6 @@ export async function computeCart(tx: Tx, input: CartInput, opts: { maxDiscountP
   return {
     lines, subtotal, taxTotal, total: r2(subtotal + taxTotal), costTotal: r2(lines.reduce((s, l) => s + l.unitCost * l.qty, 0)),
     discount: r2(docDiscount + offerDiscount), offerDiscount, couponDiscount, manualDiscount, loyaltyDiscount, loyaltyPointsUsed,
-    couponCode, appliedOffers: [...appliedOffers], warnings,
+    couponCode, appliedOffers: [...appliedOffers], warnings, rounding,
   };
 }

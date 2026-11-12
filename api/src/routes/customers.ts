@@ -22,7 +22,7 @@ r.get('/customers', can('customers.view', 'pos.use'), ah(async (req, res) => {
   if (q.filter === 'inactive') where.push(eq(C.active, false));
   const cond = where.length ? and(...where) : undefined;
   const order = q.sort === 'due' ? desc(dueSum) : q.sort === 'last' ? sql`${lastBuy} desc nulls last` : q.sort === 'invoices' ? desc(invCount) : q.sort === 'name' ? asc(C.name) : q.sort === 'oldest' ? asc(C.id) : desc(C.id);
-  const rows = await db.select({ id: C.id, name: C.name, phone: C.phone, email: C.email, type: C.type, vatNumber: C.vatNumber, active: C.active, loyaltyPoints: C.loyaltyPoints, due: dueSum, invoices: invCount, lastPurchase: lastBuy, city: C.city })
+  const rows = await db.select({ id: C.id, name: C.name, phone: C.phone, email: C.email, type: C.type, vatNumber: C.vatNumber, active: C.active, loyaltyPoints: C.loyaltyPoints, walletBalance: C.walletBalance, priceListId: C.priceListId, due: dueSum, invoices: invCount, lastPurchase: lastBuy, city: C.city })
     .from(C).where(cond).orderBy(order).limit(limit).offset(offset);
   const [{ total }] = await db.select({ total: sql<number>`count(*)::int` }).from(C).where(cond);
   const [stats] = await db.select({ total: sql<number>`count(*)::int`, newThisMonth: sql<number>`count(*) filter (where created_at >= date_trunc('month', now()))::int`, withDue: sql<number>`count(*) filter (where ${dueSum} > 0)::int`, totalDue: sql<number>`coalesce(sum(${dueSum}),0)::float` }).from(C);
@@ -46,7 +46,7 @@ const body = z.object({
   type: z.enum(['INDIVIDUAL', 'COMPANY', 'GOVERNMENT', 'NGO']).default('INDIVIDUAL'), gender: z.enum(['MALE', 'FEMALE']).nullish(), active: z.boolean().default(true),
   vatNumber: z.string().regex(/^3\d{13}3$/, 'الرقم الضريبي 15 رقماً يبدأ وينتهي بالرقم 3.').nullish().or(z.literal('')), crNumber: z.string().nullish(),
   country: z.string().nullish(), city: z.string().nullish(), district: z.string().nullish(), street: z.string().nullish(), buildingNo: z.string().nullish(),
-  additionalNo: z.string().nullish(), postalCode: z.string().nullish(), shortAddress: z.string().nullish(), lat: z.number().nullish(), lng: z.number().nullish(), notes: z.string().nullish(),
+  additionalNo: z.string().nullish(), postalCode: z.string().nullish(), shortAddress: z.string().nullish(), lat: z.number().nullish(), lng: z.number().nullish(), notes: z.string().nullish(), priceListId: z.number().nullish(),
 });
 const clean = (b: Partial<z.infer<typeof body>>) => ({ ...b, phone: b.phone || null, email: b.email || null, vatNumber: b.vatNumber || null });
 

@@ -90,7 +90,7 @@ r.get('/products', ah(async (req, res) => {
     id: P.id, type: P.type, name: P.name, nameEn: P.nameEn, barcode: P.barcode, sku: P.sku, categoryId: P.categoryId, price: P.price, cost: P.cost,
     avgCost: P.avgCost, taxIncluded: P.taxIncluded, unlimited: P.unlimited, active: P.active, image: P.image, isWeighted: P.isWeighted,
     pricePerWeight: P.pricePerWeight, expiryDate: P.expiryDate, posEnabled: P.posEnabled, onlineEnabled: P.onlineEnabled, lowStockAlert: P.lowStockAlert,
-    unitName: P.unitName, isComposite: P.isComposite, stock: stockSum,
+    unitName: P.unitName, isComposite: P.isComposite, isFavorite: P.isFavorite, stock: stockSum,
     category: sql<string>`(select name from categories c where c.id = ${qcol(P.categoryId)})`,
   }).from(P).where(cond).orderBy(order).limit(limit).offset(offset);
   const [{ total }] = await db.select({ total: sql<number>`count(*)::int` }).from(P).where(cond);
@@ -166,7 +166,7 @@ const productBody = z.object({
   expiryDate: z.string().nullish(), posEnabled: z.boolean().default(true), onlineEnabled: z.boolean().default(true),
   requiresShipping: z.boolean().default(true), nonReturnable: z.boolean().default(false), lowStockAlert: z.number().nullish(),
   isComposite: z.boolean().default(false), rentalRate: z.number().nullish(), rentalUnit: z.string().nullish(), depositAmount: z.number().nullish(),
-  description: z.string().nullish(), shortDescription: z.string().nullish(), tags: z.array(z.string()).default([]), image: z.string().nullish(), active: z.boolean().default(true),
+  description: z.string().nullish(), shortDescription: z.string().nullish(), tags: z.array(z.string()).default([]), image: z.string().nullish(), active: z.boolean().default(true), isFavorite: z.boolean().default(false),
   units: z.array(unitSchema).optional(), recipe: z.array(z.object({ componentId: z.number(), qty: z.number().positive('كمية المكوّن يجب أن تكون أكبر من صفر.') })).optional(),
   openingStock: z.array(z.object({ branchId: z.number(), qty: z.number() })).optional(),
 });
@@ -224,8 +224,9 @@ r.post('/products', can('products.manage'), ah(async (req, res) => res.status(20
 r.put('/products/:id', can('products.manage'), ah(async (req, res) => res.json(await saveProduct(Number(req.params.id), productBody.partial().parse(req.body) as z.infer<typeof productBody>, req.user!.id))));
 
 r.post('/products/bulk', can('products.manage'), ah(async (req, res) => {
-  const { ids, action, categoryId } = z.object({ ids: z.array(z.number()).min(1), action: z.enum(['activate', 'hide', 'delete', 'category']), categoryId: z.number().optional() }).parse(req.body);
+  const { ids, action, categoryId } = z.object({ ids: z.array(z.number()).min(1), action: z.enum(['activate', 'hide', 'delete', 'category', 'favorite', 'unfavorite']), categoryId: z.number().optional() }).parse(req.body);
   if (action === 'activate') await db.update(P).set({ active: true }).where(inArray(P.id, ids));
+  if (action === 'favorite' || action === 'unfavorite') await db.update(P).set({ isFavorite: action === 'favorite' }).where(inArray(P.id, ids));
   if (action === 'hide') await db.update(P).set({ active: false }).where(inArray(P.id, ids));
   if (action === 'category') await db.update(P).set({ categoryId }).where(inArray(P.id, ids));
   if (action === 'delete') {

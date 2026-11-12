@@ -94,6 +94,9 @@ export function PrinterSettingsModal({ open, onClose }: { open: boolean; onClose
         </Select>
         <Toggle checked={dev.openDrawer} disabled={!direct} onChange={(v) => set('openDrawer', v)} label="فتح درج النقود بعد الطباعة" hint="للدرج الموصول بالطابعة. يُفتح بعد كل إيصال، بما فيها إعادة الطباعة." />
         <Toggle checked={dev.autoPrint} onChange={(v) => set('autoPrint', v)} label="طباعة الإيصال تلقائياً" hint="يُطبع الإيصال فور إصدار الفاتورة." />
+        <Toggle checked={dev.autoPrintOnHold} onChange={(v) => set('autoPrintOnHold', v)} label="الطباعة التلقائية عند تعليق الفاتورة" hint="تُطبع فاتورة مبدئية (للطاولات والطلبات)." />
+        <Toggle checked={dev.autoPrintOnReturn} onChange={(v) => set('autoPrintOnReturn', v)} label="الطباعة التلقائية عند إرجاع المنتجات" />
+        <Toggle checked={dev.printKitchenTickets} onChange={(v) => set('printKitchenTickets', v)} label="طباعة تذاكر المطبخ على طابعات الأقسام" hint="تتطلب مساعد الطباعة المحلي. حدّد طابعة كل قسم من الإعدادات ← المطاعم والطلبات." />
         <Toggle checked={dev.skipSuccess} onChange={(v) => set('skipSuccess', v)} label="عدم إظهار شاشة نجاح الإصدار" hint="تظهر رسالة سريعة برقم الفاتورة بدلاً منها." />
       </div>
     </Modal>
