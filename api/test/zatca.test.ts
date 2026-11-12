@@ -49,3 +49,60 @@ describe('ZATCA', () => {
     expect(s.certSignature.length).toBeGreaterThan(60);
   });
 });
+
+import { createHash } from 'node:crypto';
+import { canonicalHashOfFinal } from '../src/services/zatca/xml.js';
+import { finalizeInvoiceXml, classifyResponse } from '../src/services/zatca/index.js';
+import { keyMatchesCert, resolveSigningKey, SANDBOX_PRIVATE_KEY, generatePrivateKey as genKey, ksaDateTime } from '../src/services/zatca/sign.js';
+import { complianceCases } from '../src/routes/branches.js';
+import { SANDBOX_CERT_B64 } from './fixtures/zatca-sandbox.js';
+
+describe('ZATCA Phase 2 conformance (matches the official SDK algorithms)', () => {
+  const signedDoc = () => finalizeInvoiceXml(sample(), { sellerName: 'متجر', vatNumber: '310123456700003', issuedAt: new Date('2026-11-11T10:00:00Z'), total: 15, taxTotal: 1.96, simplified: true, signing: { privateKeyPem: SANDBOX_PRIVATE_KEY, certificateB64: SANDBOX_CERT_B64 } });
+
+  it('hash equals C14N of the final document after removing UBLExtensions/QR/Signature', () => {
+    const d = signedDoc();
+    expect(canonicalHashOfFinal(d.xml)).toBe(d.invoiceHash);
+    expect(d.xml).toContain(`<ds:DigestValue>${d.invoiceHash}</ds:DigestValue>`);
+  });
+
+  it('SignedProperties digest = hex(sha256) of the in-document block with namespaces (SDK method)', () => {
+    const { xml } = signedDoc();
+    const block = xml.slice(xml.indexOf('<xades:SignedProperties'), xml.indexOf('</xades:SignedProperties>') + 25)
+      .replace('<xades:SignedProperties ', '<xades:SignedProperties xmlns:xades="http://uri.etsi.org/01903/v1.3.2#" ')
+      .replace(/<ds:(\w+)/g, '<ds:$1 xmlns:ds="http://www.w3.org/2000/09/xmldsig#"');
+    const expected = Buffer.from(createHash('sha256').update(block).digest('hex')).toString('base64');
+    expect(xml).toContain(`URI="#xadesSignedProperties">
+                                    <ds:DigestMethod Algorithm="http://www.w3.org/2001/04/xmlenc#sha256"/>
+                                    <ds:DigestValue>${expected}</ds:DigestValue>`);
+  });
+
+  it('uses the fixed developer-portal key when the sandbox certificate does not match the branch key', () => {
+    const own = genKey();
+    expect(keyMatchesCert(own, SANDBOX_CERT_B64)).toBe(false);
+    expect(resolveSigningKey(own, SANDBOX_CERT_B64)).toBe(SANDBOX_PRIVATE_KEY);
+  });
+
+  it('QR tag 3 matches IssueDate/IssueTime in Riyadh time', () => {
+    const d = signedDoc();
+    expect(decodeQr(d.qrCode)[3]).toBe('2026-11-11T13:00:00');
+    expect(d.xml).toContain('<cbc:IssueDate>2026-11-11</cbc:IssueDate>');
+    expect(d.xml).toContain('<cbc:IssueTime>13:00:00</cbc:IssueTime>');
+    expect(ksaDateTime(new Date('2026-11-11T22:30:00Z')).date).toBe('2026-11-12');
+  });
+
+  it('lists the compliance documents for each certificate type', () => {
+    expect(complianceCases('1100')).toHaveLength(6);
+    expect(complianceCases('0100').every((c) => c.kind === 'SIMPLIFIED')).toBe(true);
+    expect(complianceCases('1000').every((c) => c.kind === 'STANDARD')).toBe(true);
+  });
+
+  it('classifies gateway responses', () => {
+    expect(classifyResponse(200, { reportingStatus: 'REPORTED' }, 'SIMPLIFIED')).toBe('REPORTED');
+    expect(classifyResponse(202, { reportingStatus: 'REPORTED', validationResults: { status: 'WARNING' } }, 'SIMPLIFIED')).toBe('WARNING');
+    expect(classifyResponse(200, { clearanceStatus: 'CLEARED' }, 'STANDARD')).toBe('CLEARED');
+    expect(classifyResponse(400, { reportingStatus: 'NOT_REPORTED' }, 'SIMPLIFIED')).toBe('REJECTED');
+    expect(classifyResponse(503, {}, 'SIMPLIFIED')).toBe('PENDING');
+    expect(classifyResponse(401, {}, 'SIMPLIFIED')).toBe('PENDING');
+  });
+});

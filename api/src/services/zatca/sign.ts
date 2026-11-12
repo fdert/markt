@@ -1,5 +1,5 @@
 // التوقيع الرقمي (XAdES) وإنشاء المفاتيح وطلب الشهادة (CSR) لوحدة الإصدار
-import { createHash, createSign, generateKeyPairSync, X509Certificate } from 'node:crypto';
+import { createHash, createPrivateKey, createPublicKey, createSign, generateKeyPairSync, X509Certificate } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { mkdtempSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -98,7 +98,7 @@ export function signInvoice(xml: string, invoiceHash: string, privateKeyPem: str
                                         <xades:SigningCertificate>
                                             <xades:Cert>
                                                 <xades:CertDigest>
-                                                    <ds:DigestMethod xmlns:ds="http://www.w3.org/2000/09/xmldsig#" Algorithm="http://www.w3.org/2001/04/xmlenc#sha256"></ds:DigestMethod>
+                                                    <ds:DigestMethod xmlns:ds="http://www.w3.org/2000/09/xmldsig#" Algorithm="http://www.w3.org/2001/04/xmlenc#sha256"/>
                                                     <ds:DigestValue xmlns:ds="http://www.w3.org/2000/09/xmldsig#">${certHash}</ds:DigestValue>
                                                 </xades:CertDigest>
                                                 <xades:IssuerSerial>
@@ -110,10 +110,12 @@ export function signInvoice(xml: string, invoiceHash: string, privateKeyPem: str
                                     </xades:SignedSignatureProperties>
                                 </xades:SignedProperties>`;
   const signedPropsHash = Buffer.from(createHash('sha256').update(signedPropsForHash).digest('hex')).toString('base64');
-  const signedPropsInDoc = signedPropsForHash.replace(/ xmlns:ds="http:\/\/www\.w3\.org\/2000\/09\/xmldsig#"/g, '');
+  // في المستند: تُحذف تعريفات النطاقات الموروثة من الأب (كما تفعل أداة الهيئة)، والبصمة تُحسب على الصيغة الكاملة
+  const signedPropsInDoc = signedPropsForHash
+    .replace(/ xmlns:ds="http:\/\/www\.w3\.org\/2000\/09\/xmldsig#"/g, '')
+    .replace(' xmlns:xades="http://uri.etsi.org/01903/v1.3.2#"', '');
 
-  const ext = `
-    <ext:UBLExtensions>
+  const ext = `${'\n    '}<ext:UBLExtensions>
         <ext:UBLExtension>
             <ext:ExtensionURI>urn:oasis:names:specification:ubl:dsig:enveloped:xades</ext:ExtensionURI>
             <ext:ExtensionContent>
@@ -171,4 +173,35 @@ export function signInvoice(xml: string, invoiceHash: string, privateKeyPem: str
     publicKey: x509.publicKey.export({ type: 'spki', format: 'der' }) as Buffer,
     certSignature: certificateSignature(der),
   };
+}
+
+/**
+ * بيئة المطوّرين (developer-portal) تعيد دائماً شهادة ثابتة مرتبطة بمفتاح معروف،
+ * أياً كان المفتاح المستخدم في طلب الشهادة؛ لذا يجب التوقيع بهذا المفتاح هناك وإلا فشل التحقق من التوقيع.
+ */
+export const SANDBOX_PRIVATE_KEY = `-----BEGIN EC PRIVATE KEY-----
+MHQCAQEEIL14JV+5nr/sE8Sppaf2IySovrhVBtt8+yz+g4NRKyz8oAcGBSuBBAAK
+oUQDQgAEoWCKa0Sa9FIErTOv0uAkC1VIKXxU9nPpx2vlf4yhMejy8c02XJblDq7t
+Pydo8mq0ahOMmNo8gwni7Xt1KT9UeA==
+-----END EC PRIVATE KEY-----
+`;
+
+/** هل يطابق المفتاح الخاص المفتاح العام في الشهادة؟ */
+export function keyMatchesCert(privateKeyPem: string, certificateB64: string): boolean {
+  const pub = createPublicKey(createPrivateKey(privateKeyPem)).export({ type: 'spki', format: 'der' }) as Buffer;
+  const certPub = new X509Certificate(certPem(certificateB64)).publicKey.export({ type: 'spki', format: 'der' }) as Buffer;
+  return pub.equals(certPub);
+}
+
+/** يختار مفتاح التوقيع الصحيح للشهادة المستلمة (مفتاح الفرع، أو مفتاح بيئة المطوّرين الثابت) */
+export function resolveSigningKey(privateKeyPem: string, certificateB64: string): string {
+  if (keyMatchesCert(privateKeyPem, certificateB64)) return privateKeyPem;
+  if (keyMatchesCert(SANDBOX_PRIVATE_KEY, certificateB64)) return SANDBOX_PRIVATE_KEY;
+  throw new Error('الشهادة المستلمة لا تطابق المفتاح الخاص للفرع.');
+}
+
+/** التاريخ والوقت بتوقيت الرياض (UTC+3) كما يُطبع على الفاتورة */
+export function ksaDateTime(d: Date) {
+  const iso = new Date(d.getTime() + 3 * 3600_000).toISOString();
+  return { date: iso.slice(0, 10), time: iso.slice(11, 19), stamp: iso.slice(0, 19) };
 }

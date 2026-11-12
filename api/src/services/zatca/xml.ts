@@ -1,5 +1,6 @@
 // توليد فاتورة UBL 2.1 المتوافقة مع الفوترة الإلكترونية (المرحلة الثانية)
 import { createHash } from 'node:crypto';
+import { ksaDateTime } from './sign.js';
 
 export interface ZatcaParty {
   name: string; vatNumber?: string | null; crNumber?: string | null;
@@ -14,13 +15,14 @@ export interface ZatcaLine {
 
 export interface ZatcaInvoiceInput {
   number: string; uuid: string; issuedAt: Date; kind: 'SIMPLIFIED' | 'STANDARD';
-  type: 'INVOICE' | 'CREDIT_NOTE'; icv: number; previousHash: string;
+  type: 'INVOICE' | 'CREDIT_NOTE' | 'DEBIT_NOTE'; icv: number; previousHash: string;
   seller: ZatcaParty; buyer?: ZatcaParty | null; lines: ZatcaLine[];
   subtotal: number; taxTotal: number; total: number; paymentMeans: string;
   originalNumber?: string | null; reason?: string | null; supplyDate?: Date | null;
 }
 
-const esc = (s: unknown) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+// تهريب النصوص بنفس قواعد التحويل القياسي C14N حتى تتطابق البصمة مع أداة الهيئة
+const esc = (s: unknown) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/\r/g, '&#xD;');
 const a = (n: number) => n.toFixed(2);
 
 const PAYMENT_CODES: Record<string, string> = { CASH: '10', CARD: '48', BANK_TRANSFER: '42', CREDIT: '30', OTHER: '1' };
@@ -39,15 +41,32 @@ ${ind}  </cac:Country>
 ${ind}</cac:PostalAddress>`;
 }
 
+/**
+ * خصم أو رسم على مستوى البند بحيث يتحقق شرط الهيئة BR-KSA-EN16931-11:
+ * صافي البند = الكمية × السعر + الرسوم - الخصومات. الفرق الموجب (تقريب نقدي للأعلى) يُكتب رسماً.
+ */
+function lineAdjustment(l: ZatcaLine) {
+  const diff = Math.round((Math.round(l.qty * l.unitPrice * 100) / 100 - l.netAmount) * 100) / 100;
+  if (Math.abs(diff) < 0.005) return '';
+  const charge = diff < 0;
+  return `
+        <cac:AllowanceCharge>
+            <cbc:ChargeIndicator>${charge}</cbc:ChargeIndicator>
+            <cbc:AllowanceChargeReasonCode>${charge ? 'ZZZ' : '95'}</cbc:AllowanceChargeReasonCode>
+            <cbc:AllowanceChargeReason>${charge ? 'Rounding' : 'Discount'}</cbc:AllowanceChargeReason>
+            <cbc:Amount currencyID="SAR">${a(Math.abs(diff))}</cbc:Amount>
+        </cac:AllowanceCharge>`;
+}
+
 export const UBL_EXT_PLACEHOLDER = '<!--UBL_EXTENSIONS-->';
 export const QR_PLACEHOLDER = '<!--QR_REFERENCE-->';
 export const SIGNATURE_PLACEHOLDER = '<!--SIGNATURE_REFERENCE-->';
 
 export function buildInvoiceXml(i: ZatcaInvoiceInput): string {
-  const typeCode = i.type === 'CREDIT_NOTE' ? '381' : '388';
+  const typeCode = i.type === 'CREDIT_NOTE' ? '381' : i.type === 'DEBIT_NOTE' ? '383' : '388';
+  const isNote = i.type !== 'INVOICE';
   const nameCode = i.kind === 'SIMPLIFIED' ? '0200000' : '0100000';
-  const date = i.issuedAt.toISOString().slice(0, 10);
-  const time = i.issuedAt.toISOString().slice(11, 19);
+  const { date, time } = ksaDateTime(i.issuedAt);
   const byRate = new Map<number, { taxable: number; tax: number }>();
   for (const l of i.lines) {
     const g = byRate.get(l.taxRate) ?? { taxable: 0, tax: 0 };
@@ -93,12 +112,7 @@ ${address(buyer, '            ')}${buyer.vatNumber ? `
     <cac:InvoiceLine>
         <cbc:ID>${l.id}</cbc:ID>
         <cbc:InvoicedQuantity unitCode="PCE">${l.qty.toFixed(3)}</cbc:InvoicedQuantity>
-        <cbc:LineExtensionAmount currencyID="SAR">${a(l.netAmount)}</cbc:LineExtensionAmount>${l.discount > 0 ? `
-        <cac:AllowanceCharge>
-            <cbc:ChargeIndicator>false</cbc:ChargeIndicator>
-            <cbc:AllowanceChargeReason>discount</cbc:AllowanceChargeReason>
-            <cbc:Amount currencyID="SAR">${a(l.discount)}</cbc:Amount>
-        </cac:AllowanceCharge>` : ''}
+        <cbc:LineExtensionAmount currencyID="SAR">${a(l.netAmount)}</cbc:LineExtensionAmount>${lineAdjustment(l)}
         <cac:TaxTotal>
             <cbc:TaxAmount currencyID="SAR">${a(l.taxAmount)}</cbc:TaxAmount>
             <cbc:RoundingAmount currencyID="SAR">${a(l.total)}</cbc:RoundingAmount>
@@ -127,7 +141,7 @@ ${address(buyer, '            ')}${buyer.vatNumber ? `
     <cbc:IssueTime>${time}</cbc:IssueTime>
     <cbc:InvoiceTypeCode name="${nameCode}">${typeCode}</cbc:InvoiceTypeCode>
     <cbc:DocumentCurrencyCode>SAR</cbc:DocumentCurrencyCode>
-    <cbc:TaxCurrencyCode>SAR</cbc:TaxCurrencyCode>${i.type === 'CREDIT_NOTE' ? `
+    <cbc:TaxCurrencyCode>SAR</cbc:TaxCurrencyCode>${isNote ? `
     <cac:BillingReference>
         <cac:InvoiceDocumentReference>
             <cbc:ID>${esc(i.originalNumber)}</cbc:ID>
@@ -161,10 +175,10 @@ ${address(i.seller, '            ')}
         </cac:Party>
     </cac:AccountingSupplierParty>${buyerXml}${i.kind === 'STANDARD' || i.supplyDate ? `
     <cac:Delivery>
-        <cbc:ActualDeliveryDate>${(i.supplyDate ?? i.issuedAt).toISOString().slice(0, 10)}</cbc:ActualDeliveryDate>
+        <cbc:ActualDeliveryDate>${ksaDateTime(i.supplyDate ?? i.issuedAt).date}</cbc:ActualDeliveryDate>
     </cac:Delivery>` : ''}
     <cac:PaymentMeans>
-        <cbc:PaymentMeansCode>${PAYMENT_CODES[i.paymentMeans] ?? '10'}</cbc:PaymentMeansCode>${i.type === 'CREDIT_NOTE' ? `
+        <cbc:PaymentMeansCode>${PAYMENT_CODES[i.paymentMeans] ?? '10'}</cbc:PaymentMeansCode>${isNote ? `
         <cbc:InstructionNote>${esc(i.reason || 'Return of goods')}</cbc:InstructionNote>` : ''}
     </cac:PaymentMeans>
     <cac:TaxTotal>
@@ -184,22 +198,39 @@ ${address(i.seller, '            ')}
 </Invoice>`;
 }
 
+/** المسافة البادئة التي تسبق العناصر المُدرجة (التوقيع، QR) وتبقى في المستند بعد حذفها */
+export const INSERT_WS = '\n    ';
+
 /**
- * بصمة الفاتورة: SHA-256 للفاتورة بعد حذف UBLExtensions والتوقيع ومرجع QR
- * والإعلان عن XML، مع الإبقاء على المسافات المحيطة كما يفعل التحويل القياسي (C14N).
+ * بصمة الفاتورة: SHA-256 للفاتورة بعد حذف UBLExtensions ومرجع QR وcac:Signature والإعلان عن XML.
+ * أداة الهيئة تحذف العناصر بتحويل XSLT ثم تطبّق C14N11، فتبقى المسافات المحيطة بكل عنصر محذوف.
+ * لذلك نستبدل كل موضع إدراج بالمسافة البادئة نفسها التي ستبقى في المستند النهائي.
+ * signed=false: فاتورة المرحلة الأولى (لا توقيع ولا UBLExtensions، والـ QR فقط).
  */
-export function invoiceHashOf(xmlWithPlaceholders: string): string {
+export function invoiceHashOf(xmlWithPlaceholders: string, signed = true): string {
   const pure = xmlWithPlaceholders
     .replace(/^<\?xml[^>]*\?>\n/, '')
-    .replace(UBL_EXT_PLACEHOLDER, '')
-    .replace(QR_PLACEHOLDER, '')
-    .replace(SIGNATURE_PLACEHOLDER, '');
+    .replace(UBL_EXT_PLACEHOLDER, signed ? INSERT_WS : '')
+    .replace(QR_PLACEHOLDER, INSERT_WS)
+    .replace(SIGNATURE_PLACEHOLDER, signed ? INSERT_WS : '');
+  return createHash('sha256').update(pure, 'utf8').digest('base64');
+}
+
+/**
+ * يحسب البصمة من مستند نهائي (موقّع أو غير موقّع) بحذف العناصر نفسها التي يحذفها تحويل الهيئة،
+ * ويُستخدم للتحقق الذاتي وفي الاختبارات. يفترض أن المستند مكتوب بصيغة قياسية (كما يولّده رصيد).
+ */
+export function canonicalHashOfFinal(xml: string): string {
+  const pure = xml
+    .replace(/^<\?xml[^>]*\?>\s*/, '')
+    .replace(/<ext:UBLExtensions>[\s\S]*?<\/ext:UBLExtensions>/, '')
+    .replace(/<cac:Signature>[\s\S]*?<\/cac:Signature>/, '')
+    .replace(/<cac:AdditionalDocumentReference>\s*<cbc:ID>QR<\/cbc:ID>[\s\S]*?<\/cac:AdditionalDocumentReference>/, '');
   return createHash('sha256').update(pure, 'utf8').digest('base64');
 }
 
 export function qrReference(qr: string) {
-  return `
-    <cac:AdditionalDocumentReference>
+  return `${INSERT_WS}<cac:AdditionalDocumentReference>
         <cbc:ID>QR</cbc:ID>
         <cac:Attachment>
             <cbc:EmbeddedDocumentBinaryObject mimeCode="text/plain">${qr}</cbc:EmbeddedDocumentBinaryObject>
@@ -207,8 +238,7 @@ export function qrReference(qr: string) {
     </cac:AdditionalDocumentReference>`;
 }
 
-export const SIGNATURE_REF = `
-    <cac:Signature>
+export const SIGNATURE_REF = `${INSERT_WS}<cac:Signature>
         <cbc:ID>urn:oasis:names:specification:ubl:signature:Invoice</cbc:ID>
         <cbc:SignatureMethod>urn:oasis:names:specification:ubl:dsig:enveloped:xades</cbc:SignatureMethod>
     </cac:Signature>`;

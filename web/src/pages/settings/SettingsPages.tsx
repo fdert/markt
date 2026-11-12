@@ -196,15 +196,24 @@ function BillingSettings() {
 
 interface Branch { id: number; name: string; nameEn: string | null; type: string; isDefault: boolean; phone: string | null; city: string | null; district: string | null; street: string | null; buildingNo: string | null; additionalNo: string | null; postalCode: string | null; crNumber: string | null; active: boolean; zatcaEnabled: boolean; zatcaPaused: boolean; zatcaLinked: boolean; zatcaCompliance: boolean; zatcaEnv: string; icvCounter: number }
 
+interface ComplianceResult { case: string; status: number; ok: boolean; body: unknown }
+const caseLabel = (c: string) => {
+  const [kind, type] = c.split('/');
+  const std = kind === 'STANDARD';
+  if (type === 'INVOICE') return std ? 'فاتورة ضريبية' : 'فاتورة مبسّطة';
+  return `${type === 'CREDIT_NOTE' ? 'إشعار دائن' : 'إشعار مدين'} ${std ? 'ضريبي' : 'مبسّط'}`;
+};
+
 function TaxSettings() {
   const { data } = useSettings(); const save = useSave('tax'); const qc = useQueryClient(); const toast = useToast();
   const [v, setV] = useDraft(data?.tax as (AllSettings['tax'] & { taxOnShipping: boolean }) | undefined);
   const { data: branches } = useQuery({ queryKey: ['branches'], queryFn: () => api<Branch[]>('/branches') });
   const [link, setLink] = useState<Branch | null>(null); const [otp, setOtp] = useState(''); const [env, setEnv] = useState('sandbox');
-  const [results, setResults] = useState<Array<{ case: string; status: number; body: unknown }> | null>(null);
+  const [invoiceType, setInvoiceType] = useState('1100'); const [industry, setIndustry] = useState('Retail');
+  const [results, setResults] = useState<ComplianceResult[] | null>(null);
   const refresh = () => qc.invalidateQueries({ queryKey: ['branches'] });
-  const onboard = useMutation({ mutationFn: () => api(`/branches/${link!.id}/zatca/onboard`, { body: { otp, env } }), onSuccess: () => { refresh(); toast.success('تم استلام شهادة الامتثال.'); }, onError: toast.error });
-  const compliance = useMutation({ mutationFn: (id: number) => api<{ results: Array<{ case: string; status: number; body: unknown }> }>(`/branches/${id}/zatca/compliance`, { body: {} }), onSuccess: (r) => setResults(r.results), onError: toast.error });
+  const onboard = useMutation({ mutationFn: () => api(`/branches/${link!.id}/zatca/onboard`, { body: { otp, env, invoiceType, industry } }), onSuccess: () => { refresh(); toast.success('تم استلام شهادة الامتثال.'); }, onError: toast.error });
+  const compliance = useMutation({ mutationFn: (id: number) => api<{ passed: boolean; message: string; results: ComplianceResult[] }>(`/branches/${id}/zatca/compliance`, { body: {} }), onSuccess: (r) => { setResults(r.results); if (r.passed) toast.success(r.message); else toast.error(r.message); }, onError: toast.error });
   const production = useMutation({ mutationFn: (id: number) => api(`/branches/${id}/zatca/production`, { body: {} }), onSuccess: () => { refresh(); setLink(null); toast.success('تم ربط الفرع بالمرحلة الثانية.'); }, onError: toast.error });
   const pause = useMutation({ mutationFn: (b: Branch) => api(`/branches/${b.id}/zatca/pause`, { body: { paused: !b.zatcaPaused } }), onSuccess: refresh, onError: toast.error });
   const unlink = useMutation({ mutationFn: (b: Branch) => api(`/branches/${b.id}/zatca/unlink`, { body: {} }), onSuccess: refresh, onError: toast.error });
@@ -221,7 +230,10 @@ function TaxSettings() {
         <div className="mt-4"><Button loading={save.isPending} onClick={() => save.mutate(v)}>حفظ التغييرات</Button></div>
       </Card>
       <Card title="الفاتورة الإلكترونية (المرحلة الثانية)">
-        <div className="rounded-xl bg-brand-50 p-4 text-[14px] text-brand-900 mb-4">فواتيرك تحمل رمز QR للمرحلة الأولى ولا تحتاج ربطاً. اربط الفروع عند الانتقال للمرحلة الثانية (الفوترة الموقّعة): لكل فرع وحدة إصدار (EGS) بشهادة توقيع وسلسلة عدّاد فواتير (ICV) مستقلة.</div>
+        <div className="rounded-xl bg-brand-50 p-4 text-[14px] text-brand-900 mb-4 space-y-1">
+          <p><b>المرحلة الأولى (الإصدار):</b> مفعّلة تلقائياً؛ كل فاتورة تحمل رمز QR بالبيانات الخمس الإلزامية.</p>
+          <p><b>المرحلة الثانية (الربط والتكامل):</b> تُطبَّق على المنشآت على شكل موجات حسب إشعار الهيئة. لكل فرع وحدة إصدار (EGS) بشهادة توقيع وعدّاد فواتير (ICV) وسلسلة بصمات (PIH) مستقلة. الفواتير المبسّطة تُبلَّغ خلال 24 ساعة، والضريبية (B2B) تُعتمد قبل تسليمها للعميل.</p>
+        </div>
         {!branches?.length ? <Empty title="لا توجد فروع لهذا المتجر." /> : (
           <table className="table w-full"><thead><tr><th>الفرع</th><th>الحالة</th><th>العدّاد</th><th /></tr></thead>
             <tbody>{branches.filter((b) => b.type === 'BRANCH').map((b) => (
@@ -243,13 +255,23 @@ function TaxSettings() {
       <Modal open={!!link} onClose={() => setLink(null)} title={`ربط ${link?.name ?? ''} بالفاتورة الإلكترونية`} size="md">
         {link && <div className="space-y-4">
           <section className="space-y-3"><h3 className="font-bold">1. رمز التحقق</h3>
-            <Select label="البيئة" value={env} onChange={(e) => setEnv(e.target.value)}><option value="sandbox">بيئة المطورين (تجريبية)</option><option value="simulation">المحاكاة</option><option value="production">الإنتاج</option></Select>
+            <div className="grid sm:grid-cols-2 gap-3">
+              <Select label="البيئة" value={env} onChange={(e) => setEnv(e.target.value)}><option value="sandbox">بيئة المطورين (تجريبية)</option><option value="simulation">المحاكاة</option><option value="production">الإنتاج</option></Select>
+              <Select label="أنواع الفواتير" value={invoiceType} onChange={(e) => setInvoiceType(e.target.value)}><option value="1100">ضريبية ومبسّطة</option><option value="0100">مبسّطة فقط (B2C)</option><option value="1000">ضريبية فقط (B2B)</option></Select>
+            </div>
+            <Input label="النشاط التجاري" dir="ltr" value={industry} onChange={(e) => setIndustry(e.target.value)} hint="يُكتب في طلب الشهادة، مثل: Retail أو Restaurant." />
+            {env === 'sandbox' && <p className="text-sm text-ink-500">في بيئة المطورين استخدم رمز التحقق <b className="num" dir="ltr">123345</b>.</p>}
             <div className="flex gap-2 items-end"><Input label="رمز التحقق (OTP)" dir="ltr" inputMode="numeric" maxLength={6} value={otp} onChange={(e) => setOtp(e.target.value.replace(/\D/g, ''))} className="flex-1" /><Button loading={onboard.isPending} disabled={otp.length !== 6} onClick={() => onboard.mutate()}>طلب شهادة الامتثال</Button></div>
             <a className="text-sm text-brand-700 underline" href="https://fatoora.zatca.gov.sa/" target="_blank" rel="noopener noreferrer">بوابة فاتورة ↗</a>
           </section>
           <section className="space-y-2"><h3 className="font-bold">2. فحص الامتثال</h3><Button variant="secondary" loading={compliance.isPending} onClick={() => compliance.mutate(link.id)}><ShieldCheck className="size-4" />إرسال الفواتير النموذجية</Button>
-            {results && <ul className="text-sm space-y-1">{results.map((r) => <li key={r.case} className="flex justify-between"><span dir="ltr">{r.case}</span>{r.status < 300 ? <Badge tone="green">مقبولة</Badge> : <Badge tone="red">مرفوضة ({r.status})</Badge>}</li>)}</ul>}</section>
-          <section className="space-y-2"><h3 className="font-bold">3. شهادة الإنتاج</h3><Button loading={production.isPending} onClick={() => production.mutate(link.id)}>إكمال الربط</Button></section>
+            {results && <ul className="text-sm divide-y divide-ink-100">{results.map((r) => {
+              const v = (r.body as { validationResults?: { errorMessages?: Array<{ message: string }>; warningMessages?: Array<{ message: string }> } }).validationResults;
+              const notes = [...(v?.errorMessages ?? []), ...(v?.warningMessages ?? [])];
+              return <li key={r.case} className="py-1.5"><div className="flex justify-between items-center"><span>{caseLabel(r.case)}</span>{r.ok ? (v?.warningMessages?.length ? <Badge tone="amber">مقبولة مع ملاحظات</Badge> : <Badge tone="green">مقبولة</Badge>) : <Badge tone="red">مرفوضة ({r.status})</Badge>}</div>
+                {notes.length > 0 && <ul className="mt-1 text-xs text-ink-500 list-disc ps-5" dir="ltr">{notes.map((n, i) => <li key={i}>{n.message}</li>)}</ul>}</li>;
+            })}</ul>}</section>
+          <section className="space-y-2"><h3 className="font-bold">3. شهادة الإنتاج</h3><Button loading={production.isPending} disabled={!!results && !results.every((r) => r.ok)} onClick={() => production.mutate(link.id)}>إكمال الربط</Button></section>
         </div>}
       </Modal>
     </div>

@@ -7,10 +7,10 @@ import { ah, badRequest, notFound } from '../lib/http.js';
 import { can } from '../middleware/auth.js';
 import { getSetting } from '../lib/settings.js';
 import { logActivity } from '../lib/activity.js';
-import { generateCsr, generatePrivateKey, signInvoice } from '../services/zatca/sign.js';
+import { generateCsr, generatePrivateKey } from '../services/zatca/sign.js';
 import { zatcaApi } from '../services/zatca/api.js';
-import { buildInvoiceXml, invoiceHashOf, qrReference, SIGNATURE_REF } from '../services/zatca/xml.js';
-import { buildQr } from '../services/zatca/qr.js';
+import { buildInvoiceXml, type ZatcaInvoiceInput } from '../services/zatca/xml.js';
+import { finalizeInvoiceXml, signingFor } from '../services/zatca/index.js';
 
 const r = Router();
 const safe = (b: typeof schema.branches.$inferSelect) => {
@@ -54,7 +54,13 @@ async function loadBranch(id: number) {
 }
 
 r.post('/:id/zatca/onboard', can('settings.manage'), ah(async (req, res) => {
-  const { otp, env } = z.object({ otp: z.string().regex(/^\d{6}$/, 'رمز التحقق 6 أرقام.'), env: z.enum(['sandbox', 'simulation', 'production']).default('sandbox') }).parse(req.body);
+  const { otp, env, invoiceType, industry } = z.object({
+    otp: z.string().regex(/^\d{6}$/, 'رمز التحقق 6 أرقام.'),
+    env: z.enum(['sandbox', 'simulation', 'production']).default('sandbox'),
+    // 1100: ضريبية ومبسّطة، 1000: ضريبية فقط، 0100: مبسّطة فقط
+    invoiceType: z.enum(['1100', '1000', '0100']).default('1100'),
+    industry: z.string().min(2).max(60).default('Retail'),
+  }).parse(req.body);
   const branch = await loadBranch(Number(req.params.id));
   const tax = await getSetting('tax'); const store = await getSetting('store');
   if (!/^3\d{13}3$/.test(tax.vatNumber)) throw badRequest('أدخل الرقم الضريبي للمتجر أولاً من إعدادات الضريبة.');
@@ -62,8 +68,8 @@ r.post('/:id/zatca/onboard', can('settings.manage'), ah(async (req, res) => {
   const egsSerial = `1-Raseed|2-POS|3-${randomUUID()}`;
   const csr = generateCsr(privateKey, {
     commonName: `EGS-${branch.id}-${store.name}`.slice(0, 60), serialNumber: egsSerial, organizationIdentifier: tax.vatNumber,
-    organizationUnitName: branch.name, organizationName: store.name, countryName: 'SA', invoiceType: '1100',
-    location: branch.city || store.city || 'Riyadh', industry: 'Retail', env,
+    organizationUnitName: branch.name, organizationName: store.name, countryName: 'SA', invoiceType,
+    location: branch.city || store.city || 'Riyadh', industry, env,
   });
   const resp = await zatcaApi.complianceCsid(env, csr, otp);
   if (!resp.ok) throw badRequest('رفضت الهيئة طلب الربط. تحقق من رمز التحقق وأعد المحاولة.', resp.body);
@@ -72,39 +78,57 @@ r.post('/:id/zatca/onboard', can('settings.manage'), ah(async (req, res) => {
     zatcaEnv: env, egsSerial, zatcaPrivateKey: privateKey, zatcaCsr: csr, complianceCsid: body.binarySecurityToken,
     complianceSecret: body.secret, productionCsid: null, productionSecret: null, zatcaEnabled: false,
   }).where(eq(schema.branches.id, branch.id));
-  await db.insert(schema.settings).values({ key: `zatca_req_${branch.id}`, value: { requestId: body.requestID } })
-    .onConflictDoUpdate({ target: schema.settings.key, set: { value: { requestId: body.requestID } } });
+  const meta = { requestId: body.requestID, invoiceType };
+  await db.insert(schema.settings).values({ key: `zatca_req_${branch.id}`, value: meta })
+    .onConflictDoUpdate({ target: schema.settings.key, set: { value: meta } });
   res.json({ message: 'تم استلام شهادة الامتثال. أكمل فحص الامتثال.', requestId: body.requestID });
 }));
 
-/** فحص الامتثال: إرسال فواتير نموذجية موقعة (مبسطة + إشعار دائن + ضريبية) */
+/** المستندات المطلوبة في فحص الامتثال حسب نوع الفواتير في الشهادة */
+export function complianceCases(invoiceType: string) {
+  const kinds: Array<'STANDARD' | 'SIMPLIFIED'> = [];
+  if (invoiceType[0] === '1') kinds.push('STANDARD');
+  if (invoiceType[1] === '1') kinds.push('SIMPLIFIED');
+  return kinds.flatMap((kind) => (['INVOICE', 'CREDIT_NOTE', 'DEBIT_NOTE'] as const).map((type) => ({ kind, type })));
+}
+
+/** يبني مستند امتثال نموذجي موقّعاً */
+export function complianceDocument(c: { kind: 'STANDARD' | 'SIMPLIFIED'; type: 'INVOICE' | 'CREDIT_NOTE' | 'DEBIT_NOTE' }, o: {
+  icv: number; pih: string; seller: ZatcaInvoiceInput['seller']; signing: { privateKeyPem: string; certificateB64: string };
+}) {
+  const uuid = randomUUID(); const now = new Date(Date.now() - 60_000);
+  const buyer = { name: 'شركة العميل التجريبية', vatNumber: '399999999800003', city: 'الرياض', street: 'شارع التحلية', buildingNo: '2222', postalCode: '12244', district: 'السليمانية', additionalNo: '3333' };
+  const input: ZatcaInvoiceInput = {
+    number: `TST-${o.icv}`, uuid, issuedAt: now, kind: c.kind, type: c.type, icv: o.icv, previousHash: o.pih, seller: o.seller,
+    buyer: c.kind === 'STANDARD' ? buyer : null,
+    lines: [{ id: 1, name: 'منتج تجريبي', qty: 1, unitPrice: 100, discount: 0, netAmount: 100, taxRate: 15, taxAmount: 15, total: 115 }],
+    subtotal: 100, taxTotal: 15, total: 115, paymentMeans: 'CASH', originalNumber: 'TST-1', reason: 'إرجاع بضاعة', supplyDate: now,
+  };
+  const r = finalizeInvoiceXml(buildInvoiceXml(input), { sellerName: o.seller.name, vatNumber: o.seller.vatNumber!, issuedAt: now, total: 115, taxTotal: 15, simplified: c.kind === 'SIMPLIFIED', signing: o.signing });
+  return { uuid, ...r };
+}
+
+/** فحص الامتثال: إرسال المستندات النموذجية الموقّعة (فاتورة + إشعار دائن + إشعار مدين لكل نوع) */
 r.post('/:id/zatca/compliance', can('settings.manage'), ah(async (req, res) => {
   const branch = await loadBranch(Number(req.params.id));
   if (!branch.complianceCsid || !branch.zatcaPrivateKey) throw badRequest('اربط الفرع أولاً برمز التحقق.');
   const tax = await getSetting('tax'); const store = await getSetting('store');
-  const certB64 = Buffer.from(branch.complianceCsid, 'base64').toString('utf8');
-  const seller = { name: store.name, vatNumber: tax.vatNumber, crNumber: branch.crNumber || '1010010000', city: branch.city || 'Riyadh', street: branch.street || 'King Fahd', buildingNo: branch.buildingNo || '1234', postalCode: branch.postalCode || '12345', district: branch.district || 'Olaya', additionalNo: '1234' };
-  const buyer = { name: 'شركة تجريبية', vatNumber: '399999999900003', city: 'Riyadh', street: 'Test', buildingNo: '1234', postalCode: '12345', district: 'Test', additionalNo: '1234' };
-  const results: unknown[] = [];
-  let pih = branch.lastInvoiceHash;
-  const cases: Array<{ kind: 'SIMPLIFIED' | 'STANDARD'; type: 'INVOICE' | 'CREDIT_NOTE' }> = [
-    { kind: 'SIMPLIFIED', type: 'INVOICE' }, { kind: 'SIMPLIFIED', type: 'CREDIT_NOTE' }, { kind: 'STANDARD', type: 'INVOICE' }, { kind: 'STANDARD', type: 'CREDIT_NOTE' },
-  ];
+  const [meta] = await db.select().from(schema.settings).where(eq(schema.settings.key, `zatca_req_${branch.id}`));
+  const invoiceType = (meta?.value as { invoiceType?: string } | undefined)?.invoiceType ?? '1100';
+  const signing = signingFor(branch.zatcaPrivateKey, branch.complianceCsid);
+  const seller = { name: store.name, vatNumber: tax.vatNumber, crNumber: branch.crNumber || store.crNumber || '1010010000', city: branch.city || store.city || 'الرياض', street: branch.street || store.street || '-', buildingNo: branch.buildingNo || store.buildingNo || '0000', postalCode: branch.postalCode || store.postalCode || '00000', district: branch.district || store.district || '-', additionalNo: branch.additionalNo || store.additionalNo || '0000' };
+  const results: Array<{ case: string; status: number; ok: boolean; body: unknown }> = [];
+  let pih = 'NWZlY2ViNjZmZmM4NmYzOGQ5NTI3ODZjNmQ2OTZjNzljMmRiYzIzOWRkNGU5MWI0NjcyOWQ3M2EyN2ZiNTdlOQ==';
   let icv = 1;
-  for (const c of cases) {
-    const uuid = randomUUID(); const now = new Date();
-    const xml = buildInvoiceXml({ number: `TST-${icv}`, uuid, issuedAt: now, kind: c.kind, type: c.type, icv, previousHash: pih, seller, buyer: c.kind === 'STANDARD' ? buyer : null,
-      lines: [{ id: 1, name: 'منتج تجريبي', qty: 1, unitPrice: 100, discount: 0, netAmount: 100, taxRate: 15, taxAmount: 15, total: 115 }],
-      subtotal: 100, taxTotal: 15, total: 115, paymentMeans: 'CASH', originalNumber: 'TST-1', reason: 'Return', supplyDate: now });
-    const hash = invoiceHashOf(xml);
-    const signed = signInvoice(xml, hash, branch.zatcaPrivateKey, certB64, now);
-    const qr = buildQr({ sellerName: store.name, vatNumber: tax.vatNumber, timestamp: now.toISOString().slice(0, 19) + 'Z', total: '115.00', vatTotal: '15.00', invoiceHash: hash, signature: signed.signatureValue, publicKey: signed.publicKey, certificateSignature: c.kind === 'SIMPLIFIED' ? signed.certSignature : undefined });
-    const finalXml = signed.signedXml.replace('<!--QR_REFERENCE-->', qrReference(qr)).replace('<!--SIGNATURE_REFERENCE-->', SIGNATURE_REF);
-    const r2 = await zatcaApi.complianceCheck(branch.zatcaEnv, branch.complianceCsid, branch.complianceSecret!, { invoiceHash: hash, uuid, invoice: Buffer.from(finalXml).toString('base64') });
-    results.push({ case: `${c.kind}/${c.type}`, status: r2.status, body: r2.body });
-    pih = hash; icv++;
+  for (const c of complianceCases(invoiceType)) {
+    const d = complianceDocument(c, { icv, pih, seller, signing });
+    const r2 = await zatcaApi.complianceCheck(branch.zatcaEnv, branch.complianceCsid, branch.complianceSecret!, { invoiceHash: d.invoiceHash, uuid: d.uuid, invoice: Buffer.from(d.xml).toString('base64') });
+    const b = r2.body as { reportingStatus?: string; clearanceStatus?: string };
+    results.push({ case: `${c.kind}/${c.type}`, status: r2.status, ok: r2.ok && b.reportingStatus !== 'NOT_REPORTED' && b.clearanceStatus !== 'NOT_CLEARED', body: r2.body });
+    pih = d.invoiceHash; icv++;
   }
-  res.json({ results });
+  const passed = results.every((x) => x.ok);
+  res.json({ passed, message: passed ? 'اجتاز الفرع فحص الامتثال. يمكنك الآن طلب شهادة الإنتاج.' : 'لم تجتز بعض المستندات فحص الامتثال. راجع التفاصيل.', results });
 }));
 
 r.post('/:id/zatca/production', can('settings.manage'), ah(async (req, res) => {

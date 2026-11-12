@@ -23,7 +23,10 @@ jobs:
         with: { node-version: 22, cache: npm, cache-dependency-path: api/package-lock.json }
       - run: npm ci
       - run: npm run typecheck
+      # أداة التحقق الرسمية من الهيئة: تُفحص بها كل فاتورة تصدر أثناء الاختبارات
+      - run: bash ../tools/zatca-validator/setup.sh
       - run: npm test
+        env: { ZATCA_CLI: '${{ github.workspace }}/tools/zatca-validator/zatca.sh' }
 
   web:
     name: الواجهة — فحص الأنواع والبناء

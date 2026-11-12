@@ -3,8 +3,8 @@ import { eq } from 'drizzle-orm';
 import { db, schema, type Tx } from '../../db/index.js';
 import { getSetting } from '../../lib/settings.js';
 import { buildQr } from './qr.js';
-import { buildInvoiceXml, invoiceHashOf, qrReference, SIGNATURE_REF, QR_PLACEHOLDER, SIGNATURE_PLACEHOLDER, type ZatcaLine } from './xml.js';
-import { signInvoice } from './sign.js';
+import { buildInvoiceXml, invoiceHashOf, qrReference, SIGNATURE_REF, QR_PLACEHOLDER, UBL_EXT_PLACEHOLDER, SIGNATURE_PLACEHOLDER, type ZatcaLine } from './xml.js';
+import { ksaDateTime, resolveSigningKey, signInvoice } from './sign.js';
 import { zatcaApi } from './api.js';
 
 type Invoice = typeof schema.invoices.$inferSelect;
@@ -29,35 +29,27 @@ export async function stampInvoice(tx: Tx, inv: Invoice, items: ZatcaLine[], bra
     lines: items, subtotal: inv.subtotal, taxTotal: inv.taxTotal, total: inv.total, paymentMeans,
     originalNumber, reason: inv.returnReason, supplyDate: inv.supplyDate,
   });
-  const invoiceHash = invoiceHashOf(xml);
-  const timestamp = issuedAt.toISOString().slice(0, 19) + 'Z';
-
   const certToken = branch.productionCsid ?? branch.complianceCsid;
   const phase2 = branch.zatcaEnabled && !branch.zatcaPaused && !!certToken && !!branch.zatcaPrivateKey;
-  let qrCode: string; let finalXml: string; let zatcaStatus: string;
-
-  if (phase2) {
-    const certB64 = Buffer.from(certToken!, 'base64').toString('utf8');
-    const signed = signInvoice(xml, invoiceHash, branch.zatcaPrivateKey!, certB64, issuedAt);
-    qrCode = buildQr({
-      sellerName, vatNumber: tax.vatNumber, timestamp, total: inv.total.toFixed(2), vatTotal: inv.taxTotal.toFixed(2),
-      invoiceHash, signature: signed.signatureValue, publicKey: signed.publicKey,
-      certificateSignature: inv.kind === 'SIMPLIFIED' ? signed.certSignature : undefined,
-    });
-    finalXml = signed.signedXml.replace(QR_PLACEHOLDER, qrReference(qrCode)).replace(SIGNATURE_PLACEHOLDER, SIGNATURE_REF);
-    zatcaStatus = 'PENDING';
-  } else {
-    qrCode = buildQr({ sellerName, vatNumber: tax.vatNumber, timestamp, total: inv.total.toFixed(2), vatTotal: inv.taxTotal.toFixed(2) });
-    finalXml = xml.replace('<!--UBL_EXTENSIONS-->', '').replace(QR_PLACEHOLDER, qrReference(qrCode)).replace(SIGNATURE_PLACEHOLDER, '');
-    zatcaStatus = 'NOT_REQUIRED';
-  }
+  const r = finalizeInvoiceXml(xml, {
+    sellerName, vatNumber: tax.vatNumber, issuedAt, total: inv.total, taxTotal: inv.taxTotal, simplified: inv.kind === 'SIMPLIFIED',
+    signing: phase2 ? signingFor(branch.zatcaPrivateKey!, certToken!) : null,
+  });
+  const { invoiceHash, qrCode } = r; const finalXml = r.xml;
+  const zatcaStatus = phase2 ? 'PENDING' : 'NOT_REQUIRED';
 
   await tx.update(schema.branches).set({ icvCounter: icv, lastInvoiceHash: invoiceHash }).where(eq(schema.branches.id, branch.id));
   await tx.update(schema.invoices).set({ icv, previousHash, invoiceHash, qrCode, xml: finalXml, zatcaStatus }).where(eq(schema.invoices.id, inv.id));
   return { qrCode, zatcaStatus };
 }
 
-/** إرسال الفاتورة للهيئة بعد الحفظ (الإبلاغ أو الاعتماد) مع تسجيل الرد */
+/**
+ * إرسال الفاتورة للهيئة بعد الحفظ (الإبلاغ للمبسّطة، والاعتماد للضريبية) مع تسجيل الرد.
+ * - 200/202: مقبولة (202 = مقبولة مع تحذيرات).
+ * - 303 في الاعتماد: الاعتماد متوقف مؤقتاً لدى الهيئة، فتُبلَّغ الفاتورة بدلاً منه.
+ * - 400: مرفوضة ولا تُعاد. - 401/429/5xx أو خطأ شبكة: تبقى معلّقة وتُعاد لاحقاً تلقائياً.
+ * في الاعتماد تعيد الهيئة نسخة مختومة من الفاتورة (clearedInvoice) فتُحفظ بدلاً من الأصل مع رمز QR الجديد.
+ */
 export async function submitToZatca(invoiceId: number) {
   const [inv] = await db.select().from(schema.invoices).where(eq(schema.invoices.id, invoiceId));
   if (!inv || inv.zatcaStatus !== 'PENDING' || !inv.xml || !inv.invoiceHash) return null;
@@ -67,16 +59,80 @@ export async function submitToZatca(invoiceId: number) {
   if (!token || !secret) return null;
   const payload = { invoiceHash: inv.invoiceHash, uuid: inv.uuid, invoice: Buffer.from(inv.xml).toString('base64') };
   try {
-    const fn = !branch.productionCsid ? zatcaApi.complianceCheck : inv.kind === 'STANDARD' ? zatcaApi.clear : zatcaApi.report;
-    const r = await fn(branch.zatcaEnv, token, secret, payload);
-    const body = r.body as { reportingStatus?: string; clearanceStatus?: string; validationResults?: { status?: string } };
-    const status = !r.ok && r.status !== 202 ? 'REJECTED'
-      : body.validationResults?.status === 'WARNING' ? 'WARNING'
-        : inv.kind === 'STANDARD' ? 'CLEARED' : 'REPORTED';
-    await db.update(schema.invoices).set({ zatcaStatus: status, zatcaResponse: r.body as never }).where(eq(schema.invoices.id, inv.id));
-    return { status, response: r.body };
+    let r;
+    if (!branch.productionCsid) r = await zatcaApi.complianceCheck(branch.zatcaEnv, token, secret, payload);
+    else if (inv.kind === 'STANDARD') {
+      r = await zatcaApi.clear(branch.zatcaEnv, token, secret, payload);
+      if (r.status === 303) r = await zatcaApi.report(branch.zatcaEnv, token, secret, payload, '0');
+    } else r = await zatcaApi.report(branch.zatcaEnv, token, secret, payload);
+    const outcome = classifyResponse(r.status, r.body, inv.kind);
+    const patch: Partial<typeof schema.invoices.$inferInsert> = { zatcaStatus: outcome, zatcaResponse: r.body as never };
+    const cleared = (r.body as { clearedInvoice?: string }).clearedInvoice;
+    if (cleared) {
+      const xml = Buffer.from(cleared, 'base64').toString('utf8');
+      patch.xml = xml;
+      const qr = /<cbc:ID>QR<\/cbc:ID>\s*<cac:Attachment>\s*<cbc:EmbeddedDocumentBinaryObject[^>]*>([^<]+)</.exec(xml)?.[1];
+      if (qr) patch.qrCode = qr;
+    }
+    await db.update(schema.invoices).set(patch).where(eq(schema.invoices.id, inv.id));
+    return { status: outcome, response: r.body };
   } catch (e) {
     await db.update(schema.invoices).set({ zatcaResponse: { error: String(e) } as never }).where(eq(schema.invoices.id, inv.id));
     return { status: 'PENDING', error: String(e) };
   }
+}
+
+/** تصنيف رد الهيئة إلى حالة الفاتورة */
+export function classifyResponse(status: number, body: Record<string, unknown>, kind: string): string {
+  if (status === 401 || status === 429 || status >= 500) return 'PENDING';
+  if (status === 409) return kind === 'STANDARD' ? 'CLEARED' : 'REPORTED'; // سبق إرسالها
+  if (status === 400 || (status >= 300 && status !== 303)) return 'REJECTED';
+  const b = body as { reportingStatus?: string; clearanceStatus?: string; validationResults?: { status?: string } };
+  if (b.reportingStatus === 'NOT_REPORTED' || b.clearanceStatus === 'NOT_CLEARED' || b.validationResults?.status === 'ERROR') return 'REJECTED';
+  if (status === 202 || b.validationResults?.status === 'WARNING') return 'WARNING';
+  if (b.clearanceStatus) return 'CLEARED';
+  if (b.reportingStatus) return 'REPORTED';
+  return kind === 'STANDARD' ? 'CLEARED' : 'REPORTED';
+}
+
+/** إعادة إرسال الفواتير المعلّقة تلقائياً (الإبلاغ مطلوب خلال 24 ساعة من الإصدار) */
+export async function retryPendingInvoices(limit = 50) {
+  const rows = await db.select({ id: schema.invoices.id }).from(schema.invoices).where(eq(schema.invoices.zatcaStatus, 'PENDING')).limit(limit);
+  let done = 0;
+  for (const r of rows) { const x = await submitToZatca(r.id); if (x && x.status !== 'PENDING') done++; }
+  return { checked: rows.length, done };
+}
+
+export function startZatcaWorker(intervalMs = 5 * 60_000) {
+  const t = setInterval(() => { retryPendingInvoices().catch(() => undefined); }, intervalMs);
+  t.unref();
+  return t;
+}
+
+export interface FinalizeOptions {
+  sellerName: string; vatNumber: string; issuedAt: Date; total: number; taxTotal: number; simplified: boolean;
+  signing: { privateKeyPem: string; certificateB64: string } | null;
+}
+
+/** دالة نقية: تحسب البصمة وتوقّع (المرحلة الثانية) وتضيف رمز QR. تُستخدم في الإصدار والاختبارات. */
+export function finalizeInvoiceXml(xml: string, o: FinalizeOptions) {
+  const invoiceHash = invoiceHashOf(xml, !!o.signing);
+  const timestamp = ksaDateTime(o.issuedAt).stamp; // يطابق IssueDate + IssueTime
+  if (o.signing) {
+    const signed = signInvoice(xml, invoiceHash, o.signing.privateKeyPem, o.signing.certificateB64, o.issuedAt);
+    const qrCode = buildQr({
+      sellerName: o.sellerName, vatNumber: o.vatNumber, timestamp, total: o.total.toFixed(2), vatTotal: o.taxTotal.toFixed(2),
+      invoiceHash, signature: signed.signatureValue, publicKey: signed.publicKey,
+      certificateSignature: o.simplified ? signed.certSignature : undefined,
+    });
+    return { invoiceHash, qrCode, xml: signed.signedXml.replace(QR_PLACEHOLDER, qrReference(qrCode)).replace(SIGNATURE_PLACEHOLDER, SIGNATURE_REF) };
+  }
+  const qrCode = buildQr({ sellerName: o.sellerName, vatNumber: o.vatNumber, timestamp, total: o.total.toFixed(2), vatTotal: o.taxTotal.toFixed(2) });
+  return { invoiceHash, qrCode, xml: xml.replace(UBL_EXT_PLACEHOLDER, '').replace(QR_PLACEHOLDER, qrReference(qrCode)).replace(SIGNATURE_PLACEHOLDER, '') };
+}
+
+/** مفتاح وشهادة التوقيع من رمز الأمان الثنائي (binarySecurityToken) الذي تعيده الهيئة */
+export function signingFor(privateKeyPem: string, binarySecurityToken: string) {
+  const certificateB64 = Buffer.from(binarySecurityToken, 'base64').toString('utf8');
+  return { privateKeyPem: resolveSigningKey(privateKeyPem, certificateB64), certificateB64 };
 }

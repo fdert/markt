@@ -28,8 +28,8 @@ export const zatcaApi = {
   productionCsid: (env: string, token: string, secret: string, requestId: string) =>
     call(env, '/production/csids', { compliance_request_id: requestId }, { Authorization: basic(token, secret) }),
   /** إبلاغ الفاتورة المبسّطة (خلال 24 ساعة) */
-  report: (env: string, token: string, secret: string, p: { invoiceHash: string; uuid: string; invoice: string }) =>
-    call(env, '/invoices/reporting/single', p, { Authorization: basic(token, secret), 'Clearance-Status': '1' }),
+  report: (env: string, token: string, secret: string, p: { invoiceHash: string; uuid: string; invoice: string }, clearanceStatus = '1') =>
+    call(env, '/invoices/reporting/single', p, { Authorization: basic(token, secret), 'Clearance-Status': clearanceStatus }),
   /** اعتماد الفاتورة الضريبية (B2B) قبل تسليمها */
   clear: (env: string, token: string, secret: string, p: { invoiceHash: string; uuid: string; invoice: string }) =>
     call(env, '/invoices/clearance/single', p, { Authorization: basic(token, secret), 'Clearance-Status': '1' }),
