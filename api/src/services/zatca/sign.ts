@@ -17,8 +17,26 @@ export interface CsrInput {
 }
 
 /** إنشاء طلب الشهادة عبر OpenSSL بالقالب الذي تشترطه الهيئة */
+const CITY_EN: Record<string, string> = {
+  'الرياض': 'Riyadh', 'جدة': 'Jeddah', 'مكة': 'Makkah', 'مكة المكرمة': 'Makkah', 'المدينة': 'Madinah', 'المدينة المنورة': 'Madinah',
+  'الدمام': 'Dammam', 'الخبر': 'Khobar', 'الظهران': 'Dhahran', 'الطائف': 'Taif', 'تبوك': 'Tabuk', 'بريدة': 'Buraydah', 'عنيزة': 'Unaizah',
+  'حائل': 'Hail', 'أبها': 'Abha', 'خميس مشيط': 'Khamis Mushait', 'جازان': 'Jazan', 'نجران': 'Najran', 'الباحة': 'Al Bahah', 'سكاكا': 'Sakaka',
+  'عرعر': 'Arar', 'الأحساء': 'Al Ahsa', 'الهفوف': 'Hofuf', 'الجبيل': 'Jubail', 'ينبع': 'Yanbu', 'القطيف': 'Qatif', 'الخرج': 'Al Kharj',
+};
+/** يُرجع القيمة إن كانت إنجليزية، أو مقابلها المعروف (المدن)، وإلا القيمة الافتراضية */
+export function asciiField(v: string, fallback: string): string {
+  const t = (v ?? '').trim();
+  if (t && /^[\x20-\x7E]+$/.test(t)) return t;
+  return CITY_EN[t] ?? fallback;
+}
+
 export function generateCsr(privateKeyPem: string, i: CsrInput): string {
   const template = i.env === 'production' ? 'ZATCA-Code-Signing' : i.env === 'simulation' ? 'PREZATCA-Code-Signing' : 'TSTZATCA-Code-Signing';
+  // تنظيف القيم من المحارف التي تكسر ملف إعدادات OpenSSL
+  const clean = (v: string) => v.replace(/[\x00-\x1F\x7F\[\]$#\\"'`=]/g, ' ').replace(/\s+/g, ' ').trim();
+  i = Object.fromEntries(Object.entries(i).map(([k, v]) => [k, typeof v === 'string' ? clean(v) : v])) as CsrInput;
+  // حقول الامتداد SAN لا يدعم فيها OpenSSL الترميز UTF-8، فتُكتب بالإنجليزية كما في أمثلة الهيئة
+  i = { ...i, location: asciiField(i.location, 'Saudi Arabia'), industry: asciiField(i.industry, 'Retail'), serialNumber: asciiField(i.serialNumber, i.serialNumber) };
   const dir = mkdtempSync(join(tmpdir(), 'zatca-'));
   try {
     const cnf = `oid_section = OIDs
@@ -26,20 +44,20 @@ export function generateCsr(privateKeyPem: string, i: CsrInput): string {
 certificateTemplateName = 1.3.6.1.4.1.311.20.2
 [ req ]
 default_bits = 2048
-emailAddress = it@example.com
 req_extensions = v3_req
 prompt = no
 default_md = sha256
 distinguished_name = dn
+# ضروري للنصوص العربية: بدونها يُفسد OpenSSL ترميزها فترفض الهيئة الطلب (Invalid Request)
+utf8 = yes
+string_mask = utf8only
 [ dn ]
 C = ${i.countryName}
 OU = ${i.organizationUnitName}
 O = ${i.organizationName}
 CN = ${i.commonName}
 [ v3_req ]
-basicConstraints = CA:FALSE
-keyUsage = digitalSignature, nonRepudiation, keyEncipherment
-certificateTemplateName = ASN1:PRINTABLESTRING:${template}
+certificateTemplateName = ASN1:UTF8String:${template}
 subjectAltName = dirName:alt_names
 [ alt_names ]
 SN = ${i.serialNumber}
@@ -50,7 +68,7 @@ businessCategory = ${i.industry}
 `;
     writeFileSync(join(dir, 'csr.cnf'), cnf);
     writeFileSync(join(dir, 'key.pem'), privateKeyPem);
-    execFileSync('openssl', ['req', '-new', '-sha256', '-key', join(dir, 'key.pem'), '-config', join(dir, 'csr.cnf'), '-out', join(dir, 'csr.pem')]);
+    execFileSync('openssl', ['req', '-new', '-utf8', '-sha256', '-key', join(dir, 'key.pem'), '-config', join(dir, 'csr.cnf'), '-out', join(dir, 'csr.pem')]);
     return readFileSync(join(dir, 'csr.pem'), 'utf8');
   } finally {
     rmSync(dir, { recursive: true, force: true });

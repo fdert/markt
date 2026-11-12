@@ -106,3 +106,17 @@ describe('ZATCA Phase 2 conformance (matches the official SDK algorithms)', () =
     expect(classifyResponse(401, {}, 'SIMPLIFIED')).toBe('PENDING');
   });
 });
+
+describe('ZATCA CSR (matches the official SDK structure)', () => {
+  it('encodes Arabic names as UTF-8 and keeps SAN fields in English', () => {
+    const csr = generateCsr(generatePrivateKey(), { commonName: 'TST-1-399999999900003', serialNumber: '1-Raseed|2-POS|3-x', organizationIdentifier: '399999999900003', organizationUnitName: 'الفرع الرئيسي', organizationName: 'شركة "رصيد" للتجارة', countryName: 'SA', invoiceType: '1100', location: 'الرياض', industry: 'تجزئة', env: 'sandbox' });
+    const txt = execSync('openssl req -noout -text -nameopt utf8', { input: csr }).toString();
+    expect(txt).toContain('شركة رصيد للتجارة');
+    expect(txt).toContain('الفرع الرئيسي');
+    expect(txt).toContain('registeredAddress=Riyadh'); expect(txt).toContain('businessCategory=Retail');
+    expect(txt).not.toContain('Key Usage'); expect(txt).not.toContain('Basic Constraints');
+    const asn = execSync('openssl asn1parse', { input: csr }).toString();
+    expect(asn).toContain('0C155453545A415443412D436F64652D5369676E696E67'); // UTF8String "TSTZATCA-Code-Signing"
+    expect(execSync('openssl req -noout -verify 2>&1', { input: csr }).toString()).toContain('verify OK');
+  });
+});
